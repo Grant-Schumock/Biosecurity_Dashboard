@@ -1,0 +1,12 @@
+# Copy this file to sources.local.toml when real sources are selected.
+# Keep credentials and private endpoints out of git.
+
+[surveillance]
+enabled = true
+
+[legislation]
+enabled = true
+
+[publications]
+enabled = true
+
