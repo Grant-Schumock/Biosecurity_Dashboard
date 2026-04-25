@@ -10,3 +10,9 @@ Likely first choices:
 
 The dashboard should eventually expose a refresh button that calls the ingestion orchestrator and then reloads locally stored data.
 
+## Run locally
+
+```powershell
+$env:PYTHONPATH = "src"
+streamlit run src/biosecurity_dashboard/dashboard/app.py
+```

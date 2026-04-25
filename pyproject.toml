@@ -4,8 +4,9 @@ version = "0.1.0"
 description = "Local biosecurity dashboard for surveillance, legislation, and publication data."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "streamlit>=1.35",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-

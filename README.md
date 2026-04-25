@@ -16,3 +16,10 @@ A unified biosecurity dashboard pulling from surveillance, publication, and poli
 ## Front end note
 
 Python can work well end to end here. For a fast dashboard with button-triggered data pulls, good first options are Streamlit, Dash, or Panel. Streamlit is usually the quickest prototype; Dash gives more app-like control if the dashboard grows.
+
+## Run The Dashboard
+
+```powershell
+$env:PYTHONPATH = "src"
+streamlit run src/biosecurity_dashboard/dashboard/app.py
+```
