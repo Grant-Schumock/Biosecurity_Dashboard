@@ -218,17 +218,17 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Local data files
-Data/**
-!Data/
-!Data/README.md
-!Data/raw/
-!Data/raw/.gitkeep
-!Data/interim/
-!Data/interim/.gitkeep
-!Data/processed/
-!Data/processed/.gitkeep
-!Data/cache/
-!Data/cache/.gitkeep
+data/**
+!data/
+!data/README.md
+!data/raw/
+!data/raw/.gitkeep
+!data/interim/
+!data/interim/.gitkeep
+!data/processed/
+!data/processed/.gitkeep
+!data/cache/
+!data/cache/.gitkeep
 
 # Local source configuration
 configs/*.local.toml
