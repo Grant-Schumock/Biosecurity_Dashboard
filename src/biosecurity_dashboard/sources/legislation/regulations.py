@@ -36,6 +36,8 @@ class RegulationsDocumentSearch:
 
     limit: int = 250
     max_pages: int = 200
+    max_records: int = 1000
+    max_api_calls: int = 4000
     sort: str = "-postedDate"
     keywords: tuple[str, ...] = DEFAULT_KEYWORDS
     start_date: date = DEFAULT_START_DATE
@@ -64,38 +66,64 @@ def fetch_matching_documents(
     raw_pages: list[dict[str, Any]] = []
     matches_by_id: dict[str, dict[str, Any]] = {}
     total_documents_seen = 0
-    search_term = build_or_search_query(search.keywords)
+    api_calls = 0
+    errors: list[str] = []
+    exhausted_terms: set[str] = set()
+    search_terms = build_search_terms(search.keywords)
 
     for page_number in range(1, search.max_pages + 1):
-        page = _get_json(
-            f"{base_url}/documents",
-            {
-                "filter[searchTerm]": search_term,
-                "filter[postedDate][ge]": search.start_date.isoformat(),
-                "filter[postedDate][le]": end_date.isoformat(),
-                "page[size]": search.limit,
-                "page[number]": page_number,
-                "sort": search.sort,
-            },
-            api_key,
-        )
-        raw_pages.append(page)
-        documents = page.get("data", [])
-        if not isinstance(documents, list):
-            raise RegulationsApiError("Unexpected Regulations.gov response: 'data' was not a list.")
-        total_documents_seen += len(documents)
-
-        for document in documents:
+        active_terms_this_round = 0
+        for search_term in search_terms:
+            if search_term in exhausted_terms:
+                continue
+            active_terms_this_round += 1
+            if total_documents_seen >= search.max_records or api_calls >= search.max_api_calls:
+                break
+            remaining_records = search.max_records - total_documents_seen
+            api_calls += 1
             try:
-                enriched = fetch_document_detail(api_key, document, base_url=base_url)
+                page = _get_json(
+                    f"{base_url}/documents",
+                    {
+                        "filter[searchTerm]": search_term,
+                        "filter[postedDate][ge]": search.start_date.isoformat(),
+                        "filter[postedDate][le]": end_date.isoformat(),
+                        "page[size]": max(5, min(search.limit, remaining_records)),
+                        "page[number]": page_number,
+                        "sort": search.sort,
+                    },
+                    api_key,
+                )
             except RegulationsApiError as exc:
-                enriched = {**document, "detailError": str(exc)}
-            matched_terms = matching_keywords(enriched, search.keywords)
-            if matched_terms:
-                enriched["matchedKeywords"] = matched_terms
-                matches_by_id[str(enriched["id"])] = enriched
+                errors.append(f"{search_term} page {page_number}: {exc}")
+                exhausted_terms.add(search_term)
+                break
+            raw_pages.append(page)
+            documents = page.get("data", [])
+            if not isinstance(documents, list):
+                raise RegulationsApiError("Unexpected Regulations.gov response: 'data' was not a list.")
+            remaining_records = search.max_records - total_documents_seen
+            documents = documents[:remaining_records]
+            total_documents_seen += len(documents)
 
-        if len(documents) < search.limit:
+            for document in documents:
+                if api_calls >= search.max_api_calls:
+                    break
+                api_calls += 1
+                try:
+                    enriched = fetch_document_detail(api_key, document, base_url=base_url)
+                except RegulationsApiError as exc:
+                    enriched = {**document, "detailError": str(exc)}
+                matched_terms = matching_keywords(enriched, search.keywords)
+                if matched_terms:
+                    enriched["matchedKeywords"] = matched_terms
+                    matches_by_id[str(enriched["id"])] = enriched
+
+            if len(documents) < search.limit:
+                exhausted_terms.add(search_term)
+        if active_terms_this_round == 0:
+            break
+        if total_documents_seen >= search.max_records or api_calls >= search.max_api_calls:
             break
 
     matches = list(matches_by_id.values())
@@ -105,8 +133,14 @@ def fetch_matching_documents(
             "retrieved_at": datetime.now(UTC).isoformat(),
             "limit": search.limit,
             "max_pages": search.max_pages,
+            "max_records": search.max_records,
+            "max_api_calls": search.max_api_calls,
+            "api_calls_used": api_calls,
+            "completed": not errors,
+            "errors": errors,
             "sort": search.sort,
             "keywords": list(search.keywords),
+            "remote_search_terms": list(search_terms),
             "start_date": search.start_date.isoformat(),
             "end_date": end_date.isoformat(),
             "total_documents_seen": total_documents_seen,
@@ -125,7 +159,7 @@ def fetch_recent_document(
     page = _get_json(
         f"{base_url}/documents",
         {
-            "page[size]": 1,
+            "page[size]": 5,
             "page[number]": 1,
             "sort": "-postedDate",
         },
@@ -177,6 +211,14 @@ def build_or_search_query(keywords: tuple[str, ...]) -> str:
         terms.extend(_keyword_terms(keyword))
     unique_terms = list(dict.fromkeys(term for term in terms if term))
     return " OR ".join(_quote_search_term(term) for term in unique_terms)
+
+
+def build_search_terms(keywords: tuple[str, ...]) -> tuple[str, ...]:
+    """Build individual remote search terms from keyword expressions."""
+    terms = []
+    for keyword in keywords:
+        terms.extend(_keyword_terms(keyword))
+    return tuple(dict.fromkeys(term for term in terms if term))
 
 
 def _document_match_text(document: dict[str, Any]) -> str:

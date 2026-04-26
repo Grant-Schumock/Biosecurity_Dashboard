@@ -25,7 +25,7 @@ DEFAULT_CONGRESS_RANGE = tuple(range(114, 120))
 DEFAULT_KEYWORDS = (
     "nucleic acid synthesis",
     "nucleic acid procurement",
-    "synthetic nucleic acids",
+    "synthetic nucleic acid",
     "sequence screening",
     "sequence-of-concern",
     "customer screening",
@@ -44,8 +44,8 @@ DEFAULT_KEYWORDS = (
     "bioterrorism",
     "pandemic",
     "public health emergency",
-    "artificial intelligence AND biosecurity",
-    "CBRN AND artificial intelligence",
+    "CBRN",
+    "AIxBio"
 )
 
 
@@ -61,6 +61,7 @@ class CongressBillSearch:
     limit: int = 250
     max_pages_per_congress: int = 200
     max_bills: int = 1000
+    max_api_calls: int = 4000
     sort: str = "updateDate+desc"
     keywords: tuple[str, ...] = DEFAULT_KEYWORDS
     start_date: date = DEFAULT_START_DATE
@@ -91,18 +92,27 @@ def fetch_matching_bills(
     candidate_bills: list[dict[str, Any]] = []
     matches: list[dict[str, Any]] = []
     offset = 0
+    api_calls = 0
+    errors: list[str] = []
 
     while len(candidate_bills) < search.max_bills:
-        page = _get_json(
-            f"{base_url}/bill",
-            {
-                "api_key": api_key,
-                "format": "json",
-                "limit": min(search.limit, search.max_bills - len(candidate_bills)),
-                "offset": offset,
-                "sort": search.sort,
-            },
-        )
+        if api_calls >= search.max_api_calls:
+            break
+        api_calls += 1
+        try:
+            page = _get_json(
+                f"{base_url}/bill",
+                {
+                    "api_key": api_key,
+                    "format": "json",
+                    "limit": min(search.limit, search.max_bills - len(candidate_bills)),
+                    "offset": offset,
+                    "sort": search.sort,
+                },
+            )
+        except CongressApiError as exc:
+            errors.append(f"bill list offset {offset}: {exc}")
+            break
         pages.append(page)
         page_bills = page.get("bills", [])
         if not isinstance(page_bills, list):
@@ -113,18 +123,23 @@ def fetch_matching_bills(
         offset += search.limit
 
     for bill in candidate_bills[: search.max_bills]:
+        if api_calls >= search.max_api_calls:
+            break
         bill_date = _bill_relevant_date(bill)
         if bill_date and (bill_date < search.start_date or bill_date > end_date):
             continue
         try:
+            remaining_api_calls = search.max_api_calls - api_calls
             enriched_bill = fetch_bill(
                 api_key,
                 congress=int(bill["congress"]),
                 bill_type=str(bill["type"]),
                 bill_number=str(bill["number"]),
                 include_full_text=search.include_full_text,
+                max_api_calls=remaining_api_calls,
                 base_url=base_url,
             )
+            api_calls += int(enriched_bill.get("apiCallsUsed", 0))
         except CongressApiError as exc:
             enriched_bill = {**bill, "summaries": [], "fullText": "", "enrichmentError": str(exc)}
         matched_terms = matching_keywords(enriched_bill, search.keywords)
@@ -140,6 +155,10 @@ def fetch_matching_bills(
             "limit": search.limit,
             "max_pages_per_congress": search.max_pages_per_congress,
             "max_bills": search.max_bills,
+            "max_api_calls": search.max_api_calls,
+            "api_calls_used": api_calls,
+            "completed": not errors,
+            "errors": errors,
             "include_full_text": search.include_full_text,
             "sort": search.sort,
             "keywords": list(search.keywords),
@@ -188,22 +207,35 @@ def fetch_bill(
     bill_type: str,
     bill_number: str,
     include_full_text: bool = True,
+    max_api_calls: int = 10,
     base_url: str = DEFAULT_BASE_URL,
 ) -> dict[str, Any]:
     """Fetch one bill by citation and enrich it with summaries and optional full text."""
+    api_calls = 0
+    if api_calls >= max_api_calls:
+        raise CongressApiError("Congress.gov API call budget exhausted before bill detail fetch.")
     normalized_bill_type = bill_type.lower()
     bill_payload = _get_json(
         f"{base_url}/bill/{congress}/{normalized_bill_type}/{bill_number}",
         {"api_key": api_key, "format": "json"},
     )
+    api_calls += 1
     bill = bill_payload.get("bill")
     if not isinstance(bill, dict):
         raise CongressApiError(
             f"No bill returned for {congress} {bill_type.upper()} {bill_number}."
         )
     enriched_bill = enrich_bill_with_summaries(api_key, bill, base_url=base_url)
-    if include_full_text:
-        enriched_bill = enrich_bill_with_full_text(api_key, enriched_bill, base_url=base_url)
+    api_calls += 1
+    if include_full_text and api_calls < max_api_calls:
+        enriched_bill = enrich_bill_with_full_text(
+            api_key,
+            enriched_bill,
+            max_api_calls=max_api_calls - api_calls,
+            base_url=base_url,
+        )
+        api_calls += int(enriched_bill.get("fullTextApiCallsUsed", 0))
+    enriched_bill["apiCallsUsed"] = api_calls
     return enriched_bill
 
 
@@ -235,6 +267,7 @@ def enrich_bill_with_summaries(
 def enrich_bill_with_full_text(
     api_key: str,
     bill: dict[str, Any],
+    max_api_calls: int = 2,
     base_url: str = DEFAULT_BASE_URL,
 ) -> dict[str, Any]:
     """Return a bill with best-effort full text metadata and downloaded text attached."""
@@ -242,19 +275,45 @@ def enrich_bill_with_full_text(
     bill_number = str(bill.get("number", ""))
     congress = bill.get("congress")
     if not bill_type or not bill_number or not congress:
-        return {**bill, "textVersions": [], "fullText": ""}
+        return {**bill, "textVersions": [], "fullText": "", "fullTextApiCallsUsed": 0}
 
+    if max_api_calls <= 0:
+        return {
+            **bill,
+            "textVersions": [],
+            "selectedTextUrl": "",
+            "fullText": "",
+            "fullTextError": "API call budget exhausted before text metadata fetch.",
+            "fullTextApiCallsUsed": 0,
+        }
     try:
         text_payload = _get_json(
             f"{base_url}/bill/{congress}/{bill_type}/{bill_number}/text",
             {"api_key": api_key, "format": "json"},
         )
     except CongressApiError as exc:
-        return {**bill, "textVersions": [], "selectedTextUrl": "", "fullText": "", "fullTextError": str(exc)}
+        return {
+            **bill,
+            "textVersions": [],
+            "selectedTextUrl": "",
+            "fullText": "",
+            "fullTextError": str(exc),
+            "fullTextApiCallsUsed": 1,
+        }
+    api_calls = 1
     text_versions = text_payload.get("textVersions", [])
     if not isinstance(text_versions, list):
         text_versions = []
     text_url = _select_text_url(text_versions)
+    if text_url and api_calls >= max_api_calls:
+        return {
+            **bill,
+            "textVersions": text_versions,
+            "selectedTextUrl": text_url,
+            "fullText": "",
+            "fullTextError": "API call budget exhausted before text download.",
+            "fullTextApiCallsUsed": api_calls,
+        }
     try:
         full_text = _get_text(text_url) if text_url else ""
     except CongressApiError as exc:
@@ -264,12 +323,15 @@ def enrich_bill_with_full_text(
             "selectedTextUrl": text_url,
             "fullText": "",
             "fullTextError": str(exc),
+            "fullTextApiCallsUsed": api_calls + (1 if text_url else 0),
         }
+    api_calls += 1 if text_url else 0
     return {
         **bill,
         "textVersions": text_versions,
         "selectedTextUrl": text_url,
         "fullText": full_text,
+        "fullTextApiCallsUsed": api_calls,
     }
 
 

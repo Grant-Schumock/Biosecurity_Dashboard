@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import streamlit as st
@@ -32,6 +32,9 @@ from biosecurity_dashboard.storage.legislation_db import (
     upsert_federal_register_payload,
     upsert_regulations_payload,
 )
+
+
+DEFAULT_DASHBOARD_MAX_PAGES = 1
 
 
 def main() -> None:
@@ -77,15 +80,8 @@ def render_legislation_tab() -> None:
         )
         keyword_query = st.text_input("Search local database")
 
-        max_pages = st.number_input(
-            "Max pages per source",
-            min_value=1,
-            max_value=500,
-            value=200,
-        )
-
     if refresh_all:
-        refresh_all_data(int(max_pages), start_date, end_date)
+        refresh_all_data(DEFAULT_DASHBOARD_MAX_PAGES, start_date, end_date)
 
     with results:
         groups = load_grouped_records(
@@ -96,16 +92,25 @@ def render_legislation_tab() -> None:
         )
         st.caption(f"Showing locally stored legislation for {start_date:%Y-%m-%d} to {end_date:%Y-%m-%d}.")
         if not groups:
-            st.info("No locally stored bills match these filters.")
+            st.info("No locally stored documents match these filters.")
             return
 
-        st.dataframe([_group_row(group) for group in groups], use_container_width=True)
-        for group in groups:
-            with st.expander(f"{group['docket'] or group['title']} ({group['record_count']} entries)"):
-                st.dataframe(
-                    [_source_record_row(record) for record in group["records"]],
-                    use_container_width=True,
-                )
+        selection = st.dataframe(
+            [_group_row(index, group) for index, group in enumerate(groups)],
+            use_container_width=True,
+            hide_index=True,
+            selection_mode="single-row",
+            on_select="rerun",
+        )
+        selected_rows = selection.get("selection", {}).get("rows", [])
+        if selected_rows:
+            selected_group = groups[selected_rows[0]]
+            st.markdown(f"**{selected_group['title']}**")
+            st.dataframe(
+                [_source_record_row(record) for record in selected_group["records"]],
+                use_container_width=True,
+                hide_index=True,
+            )
 
 
 def refresh_all_data(max_pages: int, start_date: date, end_date: date) -> None:
@@ -193,8 +198,9 @@ def refresh_federal_register_data(
     )
 
 
-def _group_row(group: dict[str, Any]) -> dict[str, Any]:
+def _group_row(index: int, group: dict[str, Any]) -> dict[str, Any]:
     return {
+        "": index + 1,
         "Docket": group["docket"],
         "Title": group["title"],
         "Sources": ", ".join(group["sources"]),
@@ -219,7 +225,14 @@ def _source_record_row(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def _refresh_label(refresh_metadata: dict[str, Any] | None) -> str:
-    return refresh_metadata["refreshed_at"] if refresh_metadata else "never"
+    if not refresh_metadata:
+        return "never"
+    refreshed_at = str(refresh_metadata["refreshed_at"])
+    try:
+        parsed = datetime.fromisoformat(refreshed_at.replace("Z", "+00:00"))
+    except ValueError:
+        return refreshed_at
+    return f"{parsed:%B} {parsed.day}, {parsed:%Y}"
 
 
 if __name__ == "__main__":

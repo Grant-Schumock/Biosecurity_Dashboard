@@ -34,7 +34,9 @@ class FederalRegisterDocumentSearch:
     """Parameters for Federal Register document ingestion."""
 
     per_page: int = 1000
-    max_pages: int = 200
+    max_pages: int = 1
+    max_records: int = 1000
+    max_full_text_downloads: int = 1000
     order: str = "newest"
     keywords: tuple[str, ...] = DEFAULT_KEYWORDS
     start_date: date = DEFAULT_START_DATE
@@ -51,36 +53,70 @@ def fetch_matching_documents(
     raw_pages: list[dict[str, Any]] = []
     matches_by_id: dict[str, dict[str, Any]] = {}
     total_documents_seen = 0
-    search_term = build_or_search_query(search.keywords)
+    full_text_downloads = 0
+    errors: list[str] = []
+    exhausted_terms: set[str] = set()
+    search_terms = build_search_terms(search.keywords)
 
     for page_number in range(1, search.max_pages + 1):
-        page = _get_json(
-            f"{base_url}/documents.json",
-            {
-                "conditions[term]": search_term,
-                "conditions[publication_date][gte]": search.start_date.isoformat(),
-                "conditions[publication_date][lte]": end_date.isoformat(),
-                "per_page": search.per_page,
-                "page": page_number,
-                "order": search.order,
-            },
-        )
-        raw_pages.append(page)
-        documents = page.get("results", [])
-        if not isinstance(documents, list):
-            raise FederalRegisterApiError(
-                "Unexpected FederalRegister.gov response: 'results' was not a list."
-            )
-        total_documents_seen += len(documents)
+        active_terms_this_round = 0
+        for search_term in search_terms:
+            if search_term in exhausted_terms:
+                continue
+            if (
+                total_documents_seen >= search.max_records
+                or full_text_downloads >= search.max_full_text_downloads
+            ):
+                break
+            active_terms_this_round += 1
+            remaining_records = search.max_records - total_documents_seen
+            if remaining_records <= 0:
+                break
+            try:
+                page = _get_json(
+                    f"{base_url}/documents.json",
+                    {
+                        "conditions[term]": search_term,
+                        "conditions[publication_date][gte]": search.start_date.isoformat(),
+                        "conditions[publication_date][lte]": end_date.isoformat(),
+                        "per_page": min(search.per_page, remaining_records),
+                        "page": page_number,
+                        "order": search.order,
+                    },
+                )
+            except FederalRegisterApiError as exc:
+                errors.append(f"{search_term} page {page_number}: {exc}")
+                exhausted_terms.add(search_term)
+                break
+            raw_pages.append(page)
+            documents = page.get("results", [])
+            if not isinstance(documents, list):
+                raise FederalRegisterApiError(
+                    "Unexpected FederalRegister.gov response: 'results' was not a list."
+                )
+            remaining_records = search.max_records - total_documents_seen
+            documents = documents[:remaining_records]
+            total_documents_seen += len(documents)
 
-        for document in documents:
-            document = enrich_document_with_full_text(document)
-            matched_terms = matching_keywords(document, search.keywords)
-            if matched_terms:
-                document["matchedKeywords"] = matched_terms
-                matches_by_id[str(document["document_number"])] = document
+            for document in documents:
+                if full_text_downloads >= search.max_full_text_downloads:
+                    break
+                document = enrich_document_with_full_text(document)
+                if document.get("selectedTextUrl"):
+                    full_text_downloads += 1
+                matched_terms = matching_keywords(document, search.keywords)
+                if matched_terms:
+                    document["matchedKeywords"] = matched_terms
+                    matches_by_id[str(document["document_number"])] = document
 
-        if len(documents) < search.per_page:
+            if len(documents) < search.per_page:
+                exhausted_terms.add(search_term)
+        if active_terms_this_round == 0:
+            break
+        if (
+            total_documents_seen >= search.max_records
+            or full_text_downloads >= search.max_full_text_downloads
+        ):
             break
 
     matches = list(matches_by_id.values())
@@ -90,8 +126,14 @@ def fetch_matching_documents(
             "retrieved_at": datetime.now(UTC).isoformat(),
             "per_page": search.per_page,
             "max_pages": search.max_pages,
+            "max_records": search.max_records,
+            "max_full_text_downloads": search.max_full_text_downloads,
+            "full_text_downloads": full_text_downloads,
+            "completed": not errors,
+            "errors": errors,
             "order": search.order,
             "keywords": list(search.keywords),
+            "remote_search_terms": list(search_terms),
             "start_date": search.start_date.isoformat(),
             "end_date": end_date.isoformat(),
             "total_documents_seen": total_documents_seen,
@@ -192,6 +234,14 @@ def build_or_search_query(keywords: tuple[str, ...]) -> str:
         terms.extend(_keyword_terms(keyword))
     unique_terms = list(dict.fromkeys(term for term in terms if term))
     return " OR ".join(_quote_search_term(term) for term in unique_terms)
+
+
+def build_search_terms(keywords: tuple[str, ...]) -> tuple[str, ...]:
+    """Build individual remote search terms from keyword expressions."""
+    terms = []
+    for keyword in keywords:
+        terms.extend(_keyword_terms(keyword))
+    return tuple(dict.fromkeys(term for term in terms if term))
 
 
 def _document_match_text(document: dict[str, Any]) -> str:

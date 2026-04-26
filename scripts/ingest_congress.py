@@ -18,6 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=250)
     parser.add_argument("--max-bills", type=int, default=1000)
+    parser.add_argument("--max-api-calls", type=int, default=4000)
     parser.add_argument("--max-pages-per-congress", type=int, default=200)
     parser.add_argument("--start-date", default=DEFAULT_START_DATE.isoformat())
     parser.add_argument("--end-date", default=None)
@@ -41,6 +42,7 @@ def main() -> None:
     search = CongressBillSearch(
         limit=args.limit,
         max_bills=args.max_bills,
+        max_api_calls=args.max_api_calls,
         max_pages_per_congress=args.max_pages_per_congress,
         keywords=keywords,
         start_date=date.fromisoformat(args.start_date),
@@ -52,8 +54,13 @@ def main() -> None:
     saved_count = upsert_congress_payload(payload)
     print(
         f"Stored {saved_count} matched bills from "
-        f"{metadata['total_bills_seen']} Congress.gov bills reviewed."
+        f"{metadata['total_bills_seen']} Congress.gov bills reviewed "
+        f"using {metadata['api_calls_used']} API calls."
     )
+    if not metadata.get("completed", True):
+        print("Run stopped early; partial data was saved.")
+        for error in metadata.get("errors", []):
+            print(f"- {error}")
 
 
 if __name__ == "__main__":
