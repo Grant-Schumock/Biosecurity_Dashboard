@@ -53,10 +53,21 @@ def main() -> None:
             background: transparent;
             border: 0;
             color: #1f77b4;
-            justify-content: flex-start;
+            width: 100%;
             padding-left: 0;
             text-align: left;
             text-decoration: underline;
+        }
+
+        div[data-testid="stHorizontalBlock"] button[kind="secondary"] > div {
+            width: 100%;
+            display: flex;
+            justify-content: flex-start;
+        }
+
+        div[data-testid="stHorizontalBlock"] button[kind="secondary"] p {
+            width: 100%;
+            text-align: left;
         }
         div[data-testid="stHorizontalBlock"] button[kind="secondary"]:hover {
             color: #0f4c81;
