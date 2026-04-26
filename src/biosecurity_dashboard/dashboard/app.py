@@ -39,6 +39,34 @@ DEFAULT_DASHBOARD_MAX_PAGES = 1
 
 def main() -> None:
     st.set_page_config(page_title="Biosecurity Dashboard", layout="wide")
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stAlert"] {
+            width: 100%;
+        }
+        div[data-testid="stAlert"] div[role="alert"] {
+            white-space: nowrap;
+            overflow-x: auto;
+        }
+        div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
+            background: transparent;
+            border: 0;
+            color: #1f77b4;
+            justify-content: flex-start;
+            padding-left: 0;
+            text-align: left;
+            text-decoration: underline;
+        }
+        div[data-testid="stHorizontalBlock"] button[kind="secondary"]:hover {
+            color: #0f4c81;
+            background: transparent;
+            border: 0;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     st.title("Biosecurity Dashboard")
 
     render_legislation_tab()
@@ -55,16 +83,13 @@ def render_legislation_tab() -> None:
         congress_refresh = get_refresh_metadata("congress.gov")
         regulations_refresh = get_refresh_metadata("regulations.gov")
         federal_register_refresh = get_refresh_metadata("federalregister.gov")
-        refresh_button_column, refresh_info_column = st.columns([1, 1.4], gap="small")
-        with refresh_button_column:
-            refresh_all = st.button("Refresh Data", type="primary", use_container_width=True)
-        with refresh_info_column:
-            st.info(
-                "Last Data Refresh\n\n"
-                f"Congress: {_refresh_label(congress_refresh)}\n\n"
-                f"Regulations.gov: {_refresh_label(regulations_refresh)}\n\n"
-                f"Federal Register: {_refresh_label(federal_register_refresh)}"
-            )
+        refresh_all = st.button("Refresh Data", type="primary", use_container_width=True)
+        st.info(
+            "Last Data Refresh\n\n"
+            f"Congress: {_refresh_label(congress_refresh)}\n\n"
+            f"Regulations.gov: {_refresh_label(regulations_refresh)}\n\n"
+            f"Federal Register: {_refresh_label(federal_register_refresh)}"
+        )
 
         st.markdown("**Date Range**")
         start_date = st.date_input("Start", value=default_start, max_value=today)
@@ -95,22 +120,7 @@ def render_legislation_tab() -> None:
             st.info("No locally stored documents match these filters.")
             return
 
-        selection = st.dataframe(
-            [_group_row(index, group) for index, group in enumerate(groups)],
-            use_container_width=True,
-            hide_index=True,
-            selection_mode="single-row",
-            on_select="rerun",
-        )
-        selected_rows = selection.get("selection", {}).get("rows", [])
-        if selected_rows:
-            selected_group = groups[selected_rows[0]]
-            st.markdown(f"**{selected_group['title']}**")
-            st.dataframe(
-                [_source_record_row(record) for record in selected_group["records"]],
-                use_container_width=True,
-                hide_index=True,
-            )
+        _render_grouped_results(groups)
 
 
 def refresh_all_data(max_pages: int, start_date: date, end_date: date) -> None:
@@ -141,8 +151,8 @@ def refresh_congress_data(
     saved_count = upsert_congress_payload(payload)
     metadata = payload["metadata"]
     st.success(
-        f"Refresh complete. Stored {saved_count} matched bills from "
-        f"{metadata['total_bills_seen']} bills reviewed."
+        f"Refresh complete. Stored {saved_count} matched documents from "
+        f"{metadata['total_bills_seen']} documents reviewed."
     )
 
 
@@ -198,22 +208,58 @@ def refresh_federal_register_data(
     )
 
 
-def _group_row(index: int, group: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "": index + 1,
-        "Docket": group["docket"],
-        "Title": group["title"],
-        "Sources": ", ".join(group["sources"]),
-        "Entries": group["record_count"],
-        "Latest date": group["latest_date"],
-        "Matched keywords": ", ".join(group["matched_keywords"]),
-    }
+def _render_grouped_results(groups: list[dict[str, Any]]) -> None:
+    header = st.columns([1.5, 3.8, 1.5, 0.8, 1.2, 2.0])
+    header[0].markdown("**Document ID**")
+    header[1].markdown("**Title**")
+    header[2].markdown("**Sources**")
+    header[3].markdown("**Entries**")
+    header[4].markdown("**Latest Date**")
+    header[5].markdown("**Matched Keywords**")
+
+    selected_key = st.session_state.get("selected_group_key")
+    for index, group in enumerate(groups):
+        group_key = group["group_key"]
+        document_id = _group_document_id(group)
+        columns = st.columns([1.5, 3.8, 1.5, 0.8, 1.2, 2.0])
+        columns[0].write(document_id)
+        if columns[1].button(
+            group["title"],
+            key=f"group-{index}-{document_id}-{group_key}",
+            use_container_width=True,
+        ):
+            st.session_state["selected_group_key"] = None if selected_key == group_key else group_key
+            st.rerun()
+        columns[2].write(", ".join(group["sources"]))
+        columns[3].write(group["record_count"])
+        columns[4].write(group["latest_date"])
+        columns[5].write(", ".join(group["matched_keywords"]))
+
+        if st.session_state.get("selected_group_key") == group_key:
+            st.dataframe(
+                [_source_record_row(record) for record in group["records"]],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+
+def _group_document_id(group: dict[str, Any]) -> str:
+    records = group.get("records", [])
+    for preferred_source in ("Regulations.gov", "Congress.gov", "Federal Register"):
+        for record in records:
+            if record.get("source") == preferred_source:
+                return _format_record_detail(record)
+    if records:
+        return _format_record_detail(records[0])
+    if group["docket"]:
+        return group["docket"]
+    return str(group["group_key"])
 
 
 def _source_record_row(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "Source": record["source"],
-        "ID": record["detail"],
+        "Document ID": _format_record_detail(record),
         "Title": record["title"],
         "Date": record["date"],
         "Agency": record["agency"],
@@ -222,6 +268,28 @@ def _source_record_row(record: dict[str, Any]) -> dict[str, Any]:
         "Matched keywords": ", ".join(record["matched_keywords"]),
         "URL": record["url"],
     }
+
+
+def _format_record_detail(record: dict[str, Any]) -> str:
+    detail = str(record.get("detail") or record.get("record_id") or "")
+    if record.get("source") != "Congress.gov":
+        return detail
+
+    parts = detail.split()
+    if len(parts) != 2:
+        return detail
+    bill_type, bill_number = parts
+    normalized_bill_type = {
+        "HR": "H.R.",
+        "HRES": "H.Res.",
+        "HJRES": "H.J.Res.",
+        "HCONRES": "H.Con.Res.",
+        "S": "S.",
+        "SRES": "S.Res.",
+        "SJRES": "S.J.Res.",
+        "SCONRES": "S.Con.Res.",
+    }.get(bill_type.upper(), f"{bill_type}.")
+    return f"{normalized_bill_type}{bill_number}"
 
 
 def _refresh_label(refresh_metadata: dict[str, Any] | None) -> str:
