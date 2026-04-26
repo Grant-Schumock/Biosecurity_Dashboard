@@ -13,7 +13,7 @@ $env:PYTHONPATH = "src"
 python scripts/ingest_congress.py
 ```
 
-By default it searches Congress.gov data from 2015-01-01 through today, matches against bill titles and CRS summary text, and stores matching records locally for the dashboard to read.
+By default it inspects the 1000 most recently updated Congress.gov bills, fetches bill details, CRS summaries, and best-effort full text for each, then stores locally matched records for the dashboard to read.
 
 ## Regulations.gov
 

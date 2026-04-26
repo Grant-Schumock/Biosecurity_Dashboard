@@ -6,6 +6,8 @@ import html
 import json
 import os
 import re
+import socket
+import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -16,6 +18,8 @@ from urllib.request import Request, urlopen
 
 
 DEFAULT_BASE_URL = "https://api.congress.gov/v3"
+REQUEST_TIMEOUT_SECONDS = 20
+REQUEST_RETRIES = 2
 DEFAULT_START_DATE = date(2015, 1, 1)
 DEFAULT_CONGRESS_RANGE = tuple(range(114, 120))
 DEFAULT_KEYWORDS = (
@@ -56,10 +60,12 @@ class CongressBillSearch:
     congresses: tuple[int, ...] = DEFAULT_CONGRESS_RANGE
     limit: int = 250
     max_pages_per_congress: int = 200
+    max_bills: int = 1000
     sort: str = "updateDate+desc"
     keywords: tuple[str, ...] = DEFAULT_KEYWORDS
     start_date: date = DEFAULT_START_DATE
     end_date: date | None = None
+    include_full_text: bool = True
 
 
 def get_api_key(env_var: str = "CONGRESS_API_KEY") -> str:
@@ -78,46 +84,53 @@ def fetch_matching_bills(
     search: CongressBillSearch | None = None,
     base_url: str = DEFAULT_BASE_URL,
 ) -> dict[str, Any]:
-    """Fetch bills, enrich with summaries, and return title/summary keyword matches."""
+    """Fetch recent bills, enrich them, and return local keyword matches."""
     search = search or CongressBillSearch()
     end_date = search.end_date or date.today()
     pages: list[dict[str, Any]] = []
+    candidate_bills: list[dict[str, Any]] = []
     matches: list[dict[str, Any]] = []
-    total_bills_seen = 0
+    offset = 0
 
-    for congress in search.congresses:
-        for page_number in range(search.max_pages_per_congress):
-            offset = page_number * search.limit
-            page = _get_json(
-                f"{base_url}/bill/{congress}",
-                {
-                    "api_key": api_key,
-                    "format": "json",
-                    "limit": search.limit,
-                    "offset": offset,
-                    "sort": search.sort,
-                    "fromDateTime": f"{search.start_date.isoformat()}T00:00:00Z",
-                    "toDateTime": f"{end_date.isoformat()}T23:59:59Z",
-                },
+    while len(candidate_bills) < search.max_bills:
+        page = _get_json(
+            f"{base_url}/bill",
+            {
+                "api_key": api_key,
+                "format": "json",
+                "limit": min(search.limit, search.max_bills - len(candidate_bills)),
+                "offset": offset,
+                "sort": search.sort,
+            },
+        )
+        pages.append(page)
+        page_bills = page.get("bills", [])
+        if not isinstance(page_bills, list):
+            raise CongressApiError("Unexpected Congress.gov response: 'bills' was not a list.")
+        candidate_bills.extend(page_bills)
+        if len(page_bills) < search.limit:
+            break
+        offset += search.limit
+
+    for bill in candidate_bills[: search.max_bills]:
+        bill_date = _bill_relevant_date(bill)
+        if bill_date and (bill_date < search.start_date or bill_date > end_date):
+            continue
+        try:
+            enriched_bill = fetch_bill(
+                api_key,
+                congress=int(bill["congress"]),
+                bill_type=str(bill["type"]),
+                bill_number=str(bill["number"]),
+                include_full_text=search.include_full_text,
+                base_url=base_url,
             )
-            pages.append(page)
-            page_bills = page.get("bills", [])
-            if not isinstance(page_bills, list):
-                raise CongressApiError("Unexpected Congress.gov response: 'bills' was not a list.")
-            total_bills_seen += len(page_bills)
-
-            for bill in page_bills:
-                bill_date = _bill_relevant_date(bill)
-                if bill_date is None or bill_date < search.start_date or bill_date > end_date:
-                    continue
-                enriched_bill = enrich_bill_with_summaries(api_key, bill, base_url=base_url)
-                matched_terms = matching_keywords(enriched_bill, search.keywords)
-                if matched_terms:
-                    enriched_bill["matchedKeywords"] = matched_terms
-                    matches.append(enriched_bill)
-
-            if len(page_bills) < search.limit:
-                break
+        except CongressApiError as exc:
+            enriched_bill = {**bill, "summaries": [], "fullText": "", "enrichmentError": str(exc)}
+        matched_terms = matching_keywords(enriched_bill, search.keywords)
+        if matched_terms:
+            enriched_bill["matchedKeywords"] = matched_terms
+            matches.append(enriched_bill)
 
     return {
         "metadata": {
@@ -126,16 +139,72 @@ def fetch_matching_bills(
             "congresses": list(search.congresses),
             "limit": search.limit,
             "max_pages_per_congress": search.max_pages_per_congress,
+            "max_bills": search.max_bills,
+            "include_full_text": search.include_full_text,
             "sort": search.sort,
             "keywords": list(search.keywords),
             "start_date": search.start_date.isoformat(),
             "end_date": end_date.isoformat(),
-            "total_bills_seen": total_bills_seen,
+            "total_bills_seen": len(candidate_bills[: search.max_bills]),
             "matched_bills": len(matches),
         },
         "matches": matches,
         "raw_pages": pages,
     }
+
+
+def fetch_recent_bill(
+    api_key: str,
+    congress: int = 119,
+    base_url: str = DEFAULT_BASE_URL,
+) -> dict[str, Any]:
+    """Fetch one recently updated bill and enrich it with summaries."""
+    page = _get_json(
+        f"{base_url}/bill/{congress}",
+        {
+            "api_key": api_key,
+            "format": "json",
+            "limit": 1,
+            "offset": 0,
+            "sort": "updateDate+desc",
+        },
+    )
+    bills = page.get("bills", [])
+    if not isinstance(bills, list) or not bills:
+        raise CongressApiError(f"No recent bills returned for Congress {congress}.")
+    return fetch_bill(
+        api_key,
+        congress=int(bills[0]["congress"]),
+        bill_type=str(bills[0]["type"]),
+        bill_number=str(bills[0]["number"]),
+        include_full_text=True,
+        base_url=base_url,
+    )
+
+
+def fetch_bill(
+    api_key: str,
+    congress: int,
+    bill_type: str,
+    bill_number: str,
+    include_full_text: bool = True,
+    base_url: str = DEFAULT_BASE_URL,
+) -> dict[str, Any]:
+    """Fetch one bill by citation and enrich it with summaries and optional full text."""
+    normalized_bill_type = bill_type.lower()
+    bill_payload = _get_json(
+        f"{base_url}/bill/{congress}/{normalized_bill_type}/{bill_number}",
+        {"api_key": api_key, "format": "json"},
+    )
+    bill = bill_payload.get("bill")
+    if not isinstance(bill, dict):
+        raise CongressApiError(
+            f"No bill returned for {congress} {bill_type.upper()} {bill_number}."
+        )
+    enriched_bill = enrich_bill_with_summaries(api_key, bill, base_url=base_url)
+    if include_full_text:
+        enriched_bill = enrich_bill_with_full_text(api_key, enriched_bill, base_url=base_url)
+    return enriched_bill
 
 
 def enrich_bill_with_summaries(
@@ -150,14 +219,58 @@ def enrich_bill_with_summaries(
     if not bill_type or not bill_number or not congress:
         return {**bill, "summaries": []}
 
-    summary_payload = _get_json(
-        f"{base_url}/bill/{congress}/{bill_type}/{bill_number}/summaries",
-        {"api_key": api_key, "format": "json", "limit": 250},
-    )
+    try:
+        summary_payload = _get_json(
+            f"{base_url}/bill/{congress}/{bill_type}/{bill_number}/summaries",
+            {"api_key": api_key, "format": "json", "limit": 250},
+        )
+    except CongressApiError as exc:
+        return {**bill, "summaries": [], "summaryError": str(exc)}
     summaries = summary_payload.get("summaries", [])
     if not isinstance(summaries, list):
         summaries = []
     return {**bill, "summaries": summaries}
+
+
+def enrich_bill_with_full_text(
+    api_key: str,
+    bill: dict[str, Any],
+    base_url: str = DEFAULT_BASE_URL,
+) -> dict[str, Any]:
+    """Return a bill with best-effort full text metadata and downloaded text attached."""
+    bill_type = str(bill.get("type", "")).lower()
+    bill_number = str(bill.get("number", ""))
+    congress = bill.get("congress")
+    if not bill_type or not bill_number or not congress:
+        return {**bill, "textVersions": [], "fullText": ""}
+
+    try:
+        text_payload = _get_json(
+            f"{base_url}/bill/{congress}/{bill_type}/{bill_number}/text",
+            {"api_key": api_key, "format": "json"},
+        )
+    except CongressApiError as exc:
+        return {**bill, "textVersions": [], "selectedTextUrl": "", "fullText": "", "fullTextError": str(exc)}
+    text_versions = text_payload.get("textVersions", [])
+    if not isinstance(text_versions, list):
+        text_versions = []
+    text_url = _select_text_url(text_versions)
+    try:
+        full_text = _get_text(text_url) if text_url else ""
+    except CongressApiError as exc:
+        return {
+            **bill,
+            "textVersions": text_versions,
+            "selectedTextUrl": text_url,
+            "fullText": "",
+            "fullTextError": str(exc),
+        }
+    return {
+        **bill,
+        "textVersions": text_versions,
+        "selectedTextUrl": text_url,
+        "fullText": full_text,
+    }
 
 
 def matching_keywords(bill: dict[str, Any], keywords: tuple[str, ...]) -> list[str]:
@@ -190,7 +303,36 @@ def _bill_match_text(bill: dict[str, Any]) -> str:
         for summary in summaries:
             if isinstance(summary, dict):
                 parts.append(summary.get("text", ""))
+    parts.append(bill.get("fullText", ""))
     return _clean_text(" ".join(str(part) for part in parts))
+
+
+def _select_text_url(text_versions: list[dict[str, Any]]) -> str:
+    if not text_versions:
+        return ""
+    latest_version = text_versions[0]
+    formats = latest_version.get("formats", [])
+    if not isinstance(formats, list):
+        return ""
+
+    preferred_labels = ("formatted text", "xml", "html", "pdf")
+    for preferred_label in preferred_labels:
+        for text_format in formats:
+            if not isinstance(text_format, dict):
+                continue
+            label = " ".join(
+                str(text_format.get(field_name, ""))
+                for field_name in ("type", "name", "format")
+            ).casefold()
+            if preferred_label in label:
+                url = text_format.get("url")
+                if isinstance(url, str) and url:
+                    return url
+
+    for text_format in formats:
+        if isinstance(text_format, dict) and isinstance(text_format.get("url"), str):
+            return text_format["url"]
+    return ""
 
 
 def _keyword_expression_matches(keyword: str, haystack: str) -> bool:
@@ -248,14 +390,7 @@ def _get_windows_user_env(env_var: str) -> str:
 def _get_json(url: str, params: dict[str, Any]) -> dict[str, Any]:
     request_url = f"{url}?{urlencode(params)}"
     request = Request(request_url, headers={"User-Agent": "biosecurity-dashboard/0.1"})
-    try:
-        with urlopen(request, timeout=30) as response:
-            body = response.read().decode("utf-8")
-    except HTTPError as exc:
-        message = exc.read().decode("utf-8", errors="replace")
-        raise CongressApiError(f"Congress.gov request failed: {exc.code} {message}") from exc
-    except URLError as exc:
-        raise CongressApiError(f"Congress.gov request failed: {exc.reason}") from exc
+    body = _read_request(request, "Congress.gov request")
 
     try:
         parsed = json.loads(body)
@@ -264,3 +399,31 @@ def _get_json(url: str, params: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise CongressApiError("Congress.gov returned an unexpected JSON shape.")
     return parsed
+
+
+def _get_text(url: str) -> str:
+    request = Request(url, headers={"User-Agent": "biosecurity-dashboard/0.1"})
+    body, charset = _read_binary_request(request, "Congress.gov text download")
+    return body.decode(charset or "utf-8", errors="replace")
+
+
+def _read_request(request: Request, label: str) -> str:
+    body, charset = _read_binary_request(request, label)
+    return body.decode(charset or "utf-8", errors="replace")
+
+
+def _read_binary_request(request: Request, label: str) -> tuple[bytes, str | None]:
+    last_error: Exception | None = None
+    for attempt in range(1, REQUEST_RETRIES + 1):
+        try:
+            with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+                return response.read(), response.headers.get_content_charset()
+        except HTTPError as exc:
+            message = exc.read().decode("utf-8", errors="replace")
+            raise CongressApiError(f"{label} failed: {exc.code} {message}") from exc
+        except (TimeoutError, socket.timeout, URLError) as exc:
+            last_error = exc
+            if attempt < REQUEST_RETRIES:
+                time.sleep(attempt)
+                continue
+    raise CongressApiError(f"{label} failed after {REQUEST_RETRIES} attempts: {last_error}")

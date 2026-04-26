@@ -30,6 +30,7 @@ def initialize_database(db_path: Path = DEFAULT_DB_PATH) -> None:
                 latest_action_date TEXT,
                 latest_action_text TEXT,
                 summary_text TEXT,
+                full_text TEXT,
                 matched_keywords TEXT NOT NULL,
                 api_url TEXT,
                 raw_json TEXT NOT NULL,
@@ -84,6 +85,7 @@ def initialize_database(db_path: Path = DEFAULT_DB_PATH) -> None:
         )
         _ensure_column(connection, "regulatory_documents", "normalized_docket_id", "TEXT")
         _ensure_column(connection, "federal_register_documents", "normalized_docket_id", "TEXT")
+        _ensure_column(connection, "bills", "full_text", "TEXT")
 
 
 def upsert_congress_payload(payload: dict[str, Any], db_path: Path = DEFAULT_DB_PATH) -> int:
@@ -108,12 +110,13 @@ def upsert_congress_payload(payload: dict[str, Any], db_path: Path = DEFAULT_DB_
                     latest_action_date,
                     latest_action_text,
                     summary_text,
+                    full_text,
                     matched_keywords,
                     api_url,
                     raw_json,
                     refreshed_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(bill_id) DO UPDATE SET
                     title = excluded.title,
                     introduced_date = excluded.introduced_date,
@@ -121,6 +124,7 @@ def upsert_congress_payload(payload: dict[str, Any], db_path: Path = DEFAULT_DB_
                     latest_action_date = excluded.latest_action_date,
                     latest_action_text = excluded.latest_action_text,
                     summary_text = excluded.summary_text,
+                    full_text = excluded.full_text,
                     matched_keywords = excluded.matched_keywords,
                     api_url = excluded.api_url,
                     raw_json = excluded.raw_json,
@@ -345,13 +349,14 @@ def load_bills(
             (
                 LOWER(title) LIKE ?
                 OR LOWER(COALESCE(summary_text, '')) LIKE ?
+                OR LOWER(COALESCE(full_text, '')) LIKE ?
                 OR LOWER(COALESCE(latest_action_text, '')) LIKE ?
                 OR LOWER(matched_keywords) LIKE ?
             )
             """
         )
         like_keyword = f"%{keyword}%"
-        params.extend([like_keyword, like_keyword, like_keyword, like_keyword])
+        params.extend([like_keyword, like_keyword, like_keyword, like_keyword, like_keyword])
 
     where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     with sqlite3.connect(db_path) as connection:
@@ -369,6 +374,7 @@ def load_bills(
                 latest_action_date,
                 latest_action_text,
                 summary_text,
+                full_text,
                 matched_keywords,
                 api_url,
                 refreshed_at
@@ -627,6 +633,7 @@ def _bill_record(bill: dict[str, Any], refreshed_at: str) -> tuple[Any, ...]:
         latest_action.get("actionDate"),
         latest_action.get("text", ""),
         _summary_text(bill),
+        bill.get("fullText", ""),
         json.dumps(bill.get("matchedKeywords", [])),
         bill.get("url", ""),
         json.dumps(bill, sort_keys=True),
