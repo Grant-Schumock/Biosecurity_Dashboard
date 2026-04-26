@@ -73,24 +73,11 @@ def main() -> None:
 
 
 def render_legislation_tab() -> None:
-    st.subheader("Legislation")
-
     today = date.today()
     default_start = today - timedelta(days=30)
-    controls, results = st.columns([1, 2], gap="large")
 
-    with controls:
-        congress_refresh = get_refresh_metadata("congress.gov")
-        regulations_refresh = get_refresh_metadata("regulations.gov")
-        federal_register_refresh = get_refresh_metadata("federalregister.gov")
-        refresh_all = st.button("Refresh Data", type="primary", use_container_width=True)
-        st.info(
-            "Last Data Refresh\n\n"
-            f"Congress: {_refresh_label(congress_refresh)}\n\n"
-            f"Regulations.gov: {_refresh_label(regulations_refresh)}\n\n"
-            f"Federal Register: {_refresh_label(federal_register_refresh)}"
-        )
-
+    with st.sidebar:
+        keyword_query = st.text_input("Search local database")
         st.markdown("**Date Range**")
         start_date = st.date_input("Start", value=default_start, max_value=today)
         end_date = st.date_input("End", value=today, max_value=today)
@@ -103,24 +90,33 @@ def render_legislation_tab() -> None:
             ["Congress.gov", "Regulations.gov", "Federal Register"],
             default=["Congress.gov", "Regulations.gov", "Federal Register"],
         )
-        keyword_query = st.text_input("Search local database")
+
+        congress_refresh = get_refresh_metadata("congress.gov")
+        regulations_refresh = get_refresh_metadata("regulations.gov")
+        federal_register_refresh = get_refresh_metadata("federalregister.gov")
+        refresh_all = st.button("Refresh Data", type="primary", use_container_width=True)
+        st.info(
+            "Last Data Refresh\n\n"
+            f"Congress: {_refresh_label(congress_refresh)}\n\n"
+            f"Regulations.gov: {_refresh_label(regulations_refresh)}\n\n"
+            f"Federal Register: {_refresh_label(federal_register_refresh)}"
+        )
 
     if refresh_all:
         refresh_all_data(DEFAULT_DASHBOARD_MAX_PAGES, start_date, end_date)
 
-    with results:
-        groups = load_grouped_records(
-            tuple(source_filter),
-            start_date.isoformat(),
-            end_date.isoformat(),
-            keyword_query,
-        )
-        st.caption(f"Showing locally stored legislation for {start_date:%Y-%m-%d} to {end_date:%Y-%m-%d}.")
-        if not groups:
-            st.info("No locally stored documents match these filters.")
-            return
+    groups = load_grouped_records(
+        tuple(source_filter),
+        start_date.isoformat(),
+        end_date.isoformat(),
+        keyword_query,
+    )
+    st.caption(f"Showing locally stored legislation for {start_date:%Y-%m-%d} to {end_date:%Y-%m-%d}.")
+    if not groups:
+        st.info("No locally stored documents match these filters.")
+        return
 
-        _render_grouped_results(groups)
+    _render_grouped_results(groups)
 
 
 def refresh_all_data(max_pages: int, start_date: date, end_date: date) -> None:
