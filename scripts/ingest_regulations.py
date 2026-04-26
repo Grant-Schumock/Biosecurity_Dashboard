@@ -1,23 +1,23 @@
-"""Fetch Congress.gov bills and store matches in the local SQLite database."""
+"""Fetch Regulations.gov documents and store matches in the local SQLite database."""
 
 from __future__ import annotations
 
 import argparse
 from datetime import date
-from biosecurity_dashboard.sources.legislation.congress import (
-    DEFAULT_KEYWORDS,
-    DEFAULT_START_DATE,
-    CongressBillSearch,
-    fetch_matching_bills,
+
+from biosecurity_dashboard.sources.legislation.congress import DEFAULT_KEYWORDS, DEFAULT_START_DATE
+from biosecurity_dashboard.sources.legislation.regulations import (
+    RegulationsDocumentSearch,
+    fetch_matching_documents,
     get_api_key,
 )
-from biosecurity_dashboard.storage.legislation_db import upsert_congress_payload
+from biosecurity_dashboard.storage.legislation_db import upsert_regulations_payload
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--limit", type=int, default=100)
-    parser.add_argument("--max-pages-per-congress", type=int, default=200)
+    parser.add_argument("--limit", type=int, default=250)
+    parser.add_argument("--max-pages", type=int, default=200)
     parser.add_argument("--start-date", default=DEFAULT_START_DATE.isoformat())
     parser.add_argument("--end-date", default=None)
     parser.add_argument(
@@ -32,19 +32,19 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     keywords = tuple(args.keywords) if args.keywords else DEFAULT_KEYWORDS
-    search = CongressBillSearch(
+    search = RegulationsDocumentSearch(
         limit=args.limit,
-        max_pages_per_congress=args.max_pages_per_congress,
+        max_pages=args.max_pages,
         keywords=keywords,
         start_date=date.fromisoformat(args.start_date),
         end_date=date.fromisoformat(args.end_date) if args.end_date else None,
     )
-    payload = fetch_matching_bills(api_key=get_api_key(), search=search)
+    payload = fetch_matching_documents(api_key=get_api_key(), search=search)
+    saved_count = upsert_regulations_payload(payload)
     metadata = payload["metadata"]
-    saved_count = upsert_congress_payload(payload)
     print(
-        f"Stored {saved_count} matched bills from "
-        f"{metadata['total_bills_seen']} Congress.gov bills reviewed."
+        f"Stored {saved_count} matched regulatory documents from "
+        f"{metadata['total_documents_seen']} Regulations.gov documents reviewed."
     )
 
 

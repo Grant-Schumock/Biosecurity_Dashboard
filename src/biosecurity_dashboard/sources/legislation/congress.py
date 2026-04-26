@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import html
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -14,104 +16,24 @@ from urllib.request import Request, urlopen
 
 
 DEFAULT_BASE_URL = "https://api.congress.gov/v3"
-DEFAULT_CONGRESS = 119
+DEFAULT_START_DATE = date(2015, 1, 1)
+DEFAULT_CONGRESS_RANGE = tuple(range(114, 120))
 DEFAULT_KEYWORDS = (
+    "nucleic acid synthesis",
+    "synthetic nucleic acids",
+    "sequence screening",
+    "customer screening",
+    "benchtop nucleic acid synthesis",
+    "dual use research of concern",
+    "DURC",
+    "PEPP",
+    "pathogens with enhanced pandemic potential",
+    "gain-of-function",
     "biosecurity",
-    "biodefense",
     "biosafety",
-    "pandemic preparedness",
-    "infectious disease",
-    "public health emergency",
-    "pathogen",
-    "dual use research",
-    "gain of function",
+    "artificial intelligence AND biosecurity",
+    "CBRN AND artificial intelligence",
 )
-DEFAULT_EXCLUDE_KEYWORDS = (
-    "animal biosecurity",
-    "livestock",
-    "poultry",
-    "cattle",
-    "swine",
-    "aquaculture",
-    "plant pest",
-    "invasive species",
-    "weapons supply chain",
-    "munitions",
-    "ammunition",
-    "shipbuilding",
-    "semiconductor supply chain",
-)
-
-
-LEGISLATION_CATEGORIES: dict[str, dict[str, tuple[str, ...]]] = {
-    "DNA Synthesis": {
-        "keywords": (
-            "dna synthesis",
-            "gene synthesis",
-            "synthetic biology",
-            "nucleic acid synthesis",
-            "sequence screening",
-            "screening framework guidance",
-        ),
-        "exclude_keywords": DEFAULT_EXCLUDE_KEYWORDS,
-    },
-    "AI x Bio": {
-        "keywords": (
-            "artificial intelligence biology",
-            "ai biosecurity",
-            "biological design tools",
-            "biotechnology artificial intelligence",
-            "computational biology security",
-            "dual use artificial intelligence",
-        ),
-        "exclude_keywords": DEFAULT_EXCLUDE_KEYWORDS,
-    },
-    "Detection": {
-        "keywords": (
-            "pathogen detection",
-            "biosurveillance",
-            "infectious disease surveillance",
-            "wastewater surveillance",
-            "genomic surveillance",
-            "early warning",
-        ),
-        "exclude_keywords": DEFAULT_EXCLUDE_KEYWORDS,
-    },
-    "Non-pharmaceutical Interventions": {
-        "keywords": (
-            "non-pharmaceutical intervention",
-            "public health emergency",
-            "quarantine",
-            "isolation",
-            "contact tracing",
-            "mask",
-            "ventilation",
-        ),
-        "exclude_keywords": DEFAULT_EXCLUDE_KEYWORDS,
-    },
-    "Supply Chain": {
-        "keywords": (
-            "medical supply chain",
-            "public health supply chain",
-            "pharmaceutical supply chain",
-            "personal protective equipment",
-            "diagnostic supply",
-            "strategic national stockpile",
-        ),
-        "exclude_keywords": DEFAULT_EXCLUDE_KEYWORDS,
-    },
-    "Vaccines": {
-        "keywords": (
-            "vaccine",
-            "vaccination",
-            "immunization",
-            "vaccine development",
-            "vaccine manufacturing",
-            "pandemic vaccine",
-        ),
-        "exclude_keywords": DEFAULT_EXCLUDE_KEYWORDS,
-    },
-}
 
 
 class CongressApiError(RuntimeError):
@@ -120,15 +42,14 @@ class CongressApiError(RuntimeError):
 
 @dataclass(frozen=True)
 class CongressBillSearch:
-    """Parameters for a first-pass Congress.gov bill ingestion."""
+    """Parameters for Congress.gov bill ingestion into the local database."""
 
-    congress: int = DEFAULT_CONGRESS
-    limit: int = 100
-    max_pages: int = 5
+    congresses: tuple[int, ...] = DEFAULT_CONGRESS_RANGE
+    limit: int = 250
+    max_pages_per_congress: int = 200
     sort: str = "updateDate+desc"
     keywords: tuple[str, ...] = DEFAULT_KEYWORDS
-    exclude_keywords: tuple[str, ...] = DEFAULT_EXCLUDE_KEYWORDS
-    start_date: date | None = None
+    start_date: date = DEFAULT_START_DATE
     end_date: date | None = None
 
 
@@ -143,64 +64,64 @@ def get_api_key(env_var: str = "CONGRESS_API_KEY") -> str:
     return api_key
 
 
-def _get_windows_user_env(env_var: str) -> str:
-    if os.name != "nt":
-        return ""
-    try:
-        import winreg
-
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
-            value, _ = winreg.QueryValueEx(key, env_var)
-            return str(value).strip()
-    except OSError:
-        return ""
-
-
-def fetch_recent_bills(
+def fetch_matching_bills(
     api_key: str,
     search: CongressBillSearch | None = None,
     base_url: str = DEFAULT_BASE_URL,
 ) -> dict[str, Any]:
-    """Fetch recent bills and return both raw pages and locally filtered matches."""
+    """Fetch bills, enrich with summaries, and return title/summary keyword matches."""
     search = search or CongressBillSearch()
+    end_date = search.end_date or date.today()
     pages: list[dict[str, Any]] = []
-    bills: list[dict[str, Any]] = []
+    matches: list[dict[str, Any]] = []
+    total_bills_seen = 0
 
-    for page_number in range(search.max_pages):
-        offset = page_number * search.limit
-        page = _get_json(
-            f"{base_url}/bill/{search.congress}",
-            {
-                "api_key": api_key,
-                "format": "json",
-                "limit": search.limit,
-                "offset": offset,
-                "sort": search.sort,
-            },
-        )
-        pages.append(page)
-        page_bills = page.get("bills", [])
-        if not isinstance(page_bills, list):
-            raise CongressApiError("Unexpected Congress.gov response: 'bills' was not a list.")
-        bills.extend(page_bills)
-        if len(page_bills) < search.limit:
-            break
+    for congress in search.congresses:
+        for page_number in range(search.max_pages_per_congress):
+            offset = page_number * search.limit
+            page = _get_json(
+                f"{base_url}/bill/{congress}",
+                {
+                    "api_key": api_key,
+                    "format": "json",
+                    "limit": search.limit,
+                    "offset": offset,
+                    "sort": search.sort,
+                    "fromDateTime": f"{search.start_date.isoformat()}T00:00:00Z",
+                    "toDateTime": f"{end_date.isoformat()}T23:59:59Z",
+                },
+            )
+            pages.append(page)
+            page_bills = page.get("bills", [])
+            if not isinstance(page_bills, list):
+                raise CongressApiError("Unexpected Congress.gov response: 'bills' was not a list.")
+            total_bills_seen += len(page_bills)
 
-    matches = [bill for bill in bills if bill_matches_search(bill, search)]
+            for bill in page_bills:
+                bill_date = _bill_relevant_date(bill)
+                if bill_date is None or bill_date < search.start_date or bill_date > end_date:
+                    continue
+                enriched_bill = enrich_bill_with_summaries(api_key, bill, base_url=base_url)
+                matched_terms = matching_keywords(enriched_bill, search.keywords)
+                if matched_terms:
+                    enriched_bill["matchedKeywords"] = matched_terms
+                    matches.append(enriched_bill)
+
+            if len(page_bills) < search.limit:
+                break
+
     return {
         "metadata": {
             "source": "congress.gov",
-            "endpoint": f"{base_url}/bill/{search.congress}",
             "retrieved_at": datetime.now(UTC).isoformat(),
-            "congress": search.congress,
+            "congresses": list(search.congresses),
             "limit": search.limit,
-            "max_pages": search.max_pages,
+            "max_pages_per_congress": search.max_pages_per_congress,
             "sort": search.sort,
             "keywords": list(search.keywords),
-            "exclude_keywords": list(search.exclude_keywords),
-            "start_date": search.start_date.isoformat() if search.start_date else None,
-            "end_date": search.end_date.isoformat() if search.end_date else None,
-            "total_bills_seen": len(bills),
+            "start_date": search.start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "total_bills_seen": total_bills_seen,
             "matched_bills": len(matches),
         },
         "matches": matches,
@@ -208,40 +129,70 @@ def fetch_recent_bills(
     }
 
 
+def enrich_bill_with_summaries(
+    api_key: str,
+    bill: dict[str, Any],
+    base_url: str = DEFAULT_BASE_URL,
+) -> dict[str, Any]:
+    """Return a bill with Congress.gov summaries attached."""
+    bill_type = str(bill.get("type", "")).lower()
+    bill_number = str(bill.get("number", ""))
+    congress = bill.get("congress")
+    if not bill_type or not bill_number or not congress:
+        return {**bill, "summaries": []}
+
+    summary_payload = _get_json(
+        f"{base_url}/bill/{congress}/{bill_type}/{bill_number}/summaries",
+        {"api_key": api_key, "format": "json", "limit": 250},
+    )
+    summaries = summary_payload.get("summaries", [])
+    if not isinstance(summaries, list):
+        summaries = []
+    return {**bill, "summaries": summaries}
+
+
+def matching_keywords(bill: dict[str, Any], keywords: tuple[str, ...]) -> list[str]:
+    """Return keyword expressions that match the bill title or summary text."""
+    haystack = _bill_match_text(bill)
+    return [keyword for keyword in keywords if _keyword_expression_matches(keyword, haystack)]
+
+
 def bill_matches_keywords(bill: dict[str, Any], keywords: tuple[str, ...]) -> bool:
-    """Return true when a bill's list-level text matches any configured keyword."""
-    haystack = _bill_search_text(bill)
-    return any(keyword.casefold() in haystack for keyword in keywords)
+    """Return true when any keyword expression matches the bill title or summary text."""
+    return bool(matching_keywords(bill, keywords))
 
 
-def bill_matches_search(bill: dict[str, Any], search: CongressBillSearch) -> bool:
-    """Return true when a bill matches keywords, exclusions, and date bounds."""
-    haystack = _bill_search_text(bill)
-    if search.keywords and not any(keyword.casefold() in haystack for keyword in search.keywords):
-        return False
-    if search.exclude_keywords and any(
-        keyword.casefold() in haystack for keyword in search.exclude_keywords
-    ):
-        return False
-
-    bill_date = _bill_relevant_date(bill)
-    if search.start_date and (bill_date is None or bill_date < search.start_date):
-        return False
-    if search.end_date and (bill_date is None or bill_date > search.end_date):
-        return False
-    return True
+def save_raw_ingest(payload: dict[str, Any], output_dir: Path) -> Path:
+    """Save a raw Congress.gov ingestion payload with a timestamped filename."""
+    if not payload.get("matches"):
+        raise CongressApiError("No matching bills to save.")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    retrieved_at = payload["metadata"]["retrieved_at"]
+    timestamp = retrieved_at.replace(":", "").replace("-", "").split(".")[0]
+    output_path = output_dir / f"congress_bills_{timestamp}.json"
+    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return output_path
 
 
-def _bill_search_text(bill: dict[str, Any]) -> str:
-    haystack_parts = [
-        bill.get("title", ""),
-        bill.get("type", ""),
-        bill.get("number", ""),
-    ]
-    latest_action = bill.get("latestAction")
-    if isinstance(latest_action, dict):
-        haystack_parts.append(latest_action.get("text", ""))
-    return " ".join(str(part) for part in haystack_parts).casefold()
+def _bill_match_text(bill: dict[str, Any]) -> str:
+    parts = [bill.get("title", "")]
+    summaries = bill.get("summaries", [])
+    if isinstance(summaries, list):
+        for summary in summaries:
+            if isinstance(summary, dict):
+                parts.append(summary.get("text", ""))
+    return _clean_text(" ".join(str(part) for part in parts))
+
+
+def _keyword_expression_matches(keyword: str, haystack: str) -> bool:
+    terms = [term.strip().casefold() for term in re.split(r"\s+AND\s+", keyword, flags=re.I)]
+    terms = [term for term in terms if term]
+    return bool(terms) and all(term in haystack for term in terms)
+
+
+def _clean_text(value: str) -> str:
+    without_tags = re.sub(r"<[^>]+>", " ", html.unescape(value))
+    return re.sub(r"\s+", " ", without_tags).strip().casefold()
 
 
 def _bill_relevant_date(bill: dict[str, Any]) -> date | None:
@@ -265,17 +216,17 @@ def _parse_date(value: Any) -> date | None:
         return None
 
 
-def save_raw_ingest(payload: dict[str, Any], output_dir: Path) -> Path:
-    """Save a raw Congress.gov ingestion payload with a timestamped filename."""
-    if not payload.get("matches"):
-        raise CongressApiError("No matching bills to save.")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    retrieved_at = payload["metadata"]["retrieved_at"]
-    timestamp = retrieved_at.replace(":", "").replace("-", "").split(".")[0]
-    congress = payload["metadata"]["congress"]
-    output_path = output_dir / f"congress_bills_{congress}_{timestamp}.json"
-    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    return output_path
+def _get_windows_user_env(env_var: str) -> str:
+    if os.name != "nt":
+        return ""
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            value, _ = winreg.QueryValueEx(key, env_var)
+            return str(value).strip()
+    except OSError:
+        return ""
 
 
 def _get_json(url: str, params: dict[str, Any]) -> dict[str, Any]:

@@ -1,12 +1,12 @@
 # Biosecurity_Dashboard
-A unified biosecurity dashboard pulling from surveillance, publication, and policy feeds.
+A local biosecurity policy dashboard pulling from legislation and regulatory feeds.
 
 ## Project layout
 
 - `src/biosecurity_dashboard/` - Python package for the application.
 - `src/biosecurity_dashboard/dashboard/` - dashboard UI code and button-triggered refresh flows.
 - `src/biosecurity_dashboard/ingestion/` - shared data pull orchestration.
-- `src/biosecurity_dashboard/sources/` - source-specific connectors for surveillance, legislation, and publications.
+- `src/biosecurity_dashboard/sources/` - source-specific connectors for legislation and regulatory data.
 - `src/biosecurity_dashboard/storage/` - local storage helpers and schemas.
 - `configs/` - source configuration and dashboard settings.
 - `Data/` - local data files, kept out of git except documentation/placeholders.
@@ -23,3 +23,5 @@ Python can work well end to end here. For a fast dashboard with button-triggered
 $env:PYTHONPATH = "src"
 streamlit run src/biosecurity_dashboard/dashboard/app.py
 ```
+
+The Legislation tab reads from `Data/processed/legislation.sqlite`. Use the tab's refresh buttons, or run `python scripts/ingest_congress.py` / `python scripts/ingest_regulations.py`, to pull new source data into the local database.

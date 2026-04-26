@@ -6,11 +6,22 @@ Potential examples include Congress.gov, GovInfo, state legislatures, committee 
 
 ## Congress.gov
 
-The first ingestion script uses the Congress.gov v3 bill endpoint and reads the API key from `CONGRESS_API_KEY`.
+The ingestion script uses Congress.gov bill and summary endpoints, reads the API key from `CONGRESS_API_KEY`, and stores matched bills in the local SQLite database at `Data/processed/legislation.sqlite`.
 
 ```powershell
 $env:PYTHONPATH = "src"
 python scripts/ingest_congress.py
 ```
 
-By default it fetches recent bills from the 119th Congress, filters list-level records for initial biosecurity/biodefense keywords, and writes a timestamped raw JSON file to `Data/raw/legislation/congress/`.
+By default it searches Congress.gov data from 2015-01-01 through today, matches against bill titles and CRS summary text, and stores matching records locally for the dashboard to read.
+
+## Regulations.gov
+
+The Regulations.gov ingestion script reads the API key from `REGULATIONS_API_KEY`, searches the v4 document endpoint, and stores matched documents in the same local SQLite database.
+
+```powershell
+$env:PYTHONPATH = "src"
+python scripts/ingest_regulations.py
+```
+
+By default it searches documents posted from 2015-01-01 through today and matches against document title, abstract, subject, document type, and agency metadata.
