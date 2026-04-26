@@ -122,7 +122,7 @@ def render_legislation_tab() -> None:
         end_date.isoformat(),
         keyword_query,
     )
-    st.caption(f"Showing locally stored legislation for {start_date:%Y-%m-%d} to {end_date:%Y-%m-%d}.")
+    st.caption(f"Showing documents from {start_date:%Y-%m-%d} to {end_date:%Y-%m-%d}.")
     if not groups:
         st.info("No locally stored documents match these filters.")
         return
