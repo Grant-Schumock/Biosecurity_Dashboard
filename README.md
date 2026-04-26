@@ -24,4 +24,4 @@ $env:PYTHONPATH = "src"
 streamlit run src/biosecurity_dashboard/dashboard/app.py
 ```
 
-The Legislation tab reads from `Data/processed/legislation.sqlite`. Use the tab's refresh buttons, or run `python scripts/ingest_congress.py` / `python scripts/ingest_regulations.py`, to pull new source data into the local database.
+The dashboard reads from `Data/processed/legislation.sqlite`. Use the refresh buttons, or run `python scripts/ingest_congress.py`, `python scripts/ingest_regulations.py`, or `python scripts/ingest_federal_register.py`, to pull new source data into the local database.

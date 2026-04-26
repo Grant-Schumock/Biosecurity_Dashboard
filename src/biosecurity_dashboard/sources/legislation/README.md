@@ -25,3 +25,14 @@ python scripts/ingest_regulations.py
 ```
 
 By default it searches documents posted from 2015-01-01 through today and matches against document title, abstract, subject, document type, and agency metadata.
+
+## FederalRegister.gov
+
+FederalRegister.gov does not require an API key. The ingestion script searches the v1 document endpoint and stores matched documents in the same local SQLite database.
+
+```powershell
+$env:PYTHONPATH = "src"
+python scripts/ingest_federal_register.py
+```
+
+By default it searches documents published from 2015-01-01 through today and matches against title, abstract, excerpts, action text, document type, agency names, topics, and docket ID.

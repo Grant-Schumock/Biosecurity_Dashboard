@@ -60,6 +60,23 @@ def initialize_database(db_path: Path = DEFAULT_DB_PATH) -> None:
                 raw_json TEXT NOT NULL,
                 refreshed_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS federal_register_documents (
+                document_number TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                document_type TEXT,
+                agency_names TEXT,
+                docket_id TEXT,
+                publication_date TEXT,
+                abstract TEXT,
+                action TEXT,
+                matched_keywords TEXT NOT NULL,
+                html_url TEXT,
+                pdf_url TEXT,
+                raw_text_url TEXT,
+                raw_json TEXT NOT NULL,
+                refreshed_at TEXT NOT NULL
+            );
             """
         )
 
@@ -206,6 +223,85 @@ def upsert_regulations_payload(payload: dict[str, Any], db_path: Path = DEFAULT_
             """,
             (
                 "regulations.gov",
+                refreshed_at,
+                metadata["start_date"],
+                metadata["end_date"],
+                metadata["total_documents_seen"],
+                metadata["matched_documents"],
+                json.dumps(metadata["keywords"]),
+            ),
+        )
+    return len(matches)
+
+
+def upsert_federal_register_payload(payload: dict[str, Any], db_path: Path = DEFAULT_DB_PATH) -> int:
+    """Store matched FederalRegister.gov documents and refresh metadata."""
+    initialize_database(db_path)
+    metadata = payload["metadata"]
+    refreshed_at = datetime.now(UTC).isoformat()
+    matches = payload.get("matches", [])
+
+    with sqlite3.connect(db_path) as connection:
+        for document in matches:
+            connection.execute(
+                """
+                INSERT INTO federal_register_documents (
+                    document_number,
+                    title,
+                    document_type,
+                    agency_names,
+                    docket_id,
+                    publication_date,
+                    abstract,
+                    action,
+                    matched_keywords,
+                    html_url,
+                    pdf_url,
+                    raw_text_url,
+                    raw_json,
+                    refreshed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(document_number) DO UPDATE SET
+                    title = excluded.title,
+                    document_type = excluded.document_type,
+                    agency_names = excluded.agency_names,
+                    docket_id = excluded.docket_id,
+                    publication_date = excluded.publication_date,
+                    abstract = excluded.abstract,
+                    action = excluded.action,
+                    matched_keywords = excluded.matched_keywords,
+                    html_url = excluded.html_url,
+                    pdf_url = excluded.pdf_url,
+                    raw_text_url = excluded.raw_text_url,
+                    raw_json = excluded.raw_json,
+                    refreshed_at = excluded.refreshed_at
+                """,
+                _federal_register_document_record(document, refreshed_at),
+            )
+
+        connection.execute(
+            """
+            INSERT INTO refresh_metadata (
+                source,
+                refreshed_at,
+                start_date,
+                end_date,
+                total_bills_seen,
+                matched_bills,
+                keywords
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source) DO UPDATE SET
+                refreshed_at = excluded.refreshed_at,
+                start_date = excluded.start_date,
+                end_date = excluded.end_date,
+                total_bills_seen = excluded.total_bills_seen,
+                matched_bills = excluded.matched_bills,
+                keywords = excluded.keywords
+            """,
+            (
+                "federalregister.gov",
                 refreshed_at,
                 metadata["start_date"],
                 metadata["end_date"],
@@ -367,6 +463,69 @@ def load_regulatory_documents(
     return [dict(row) for row in rows]
 
 
+def load_federal_register_documents(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    keyword_query: str | None = None,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> list[dict[str, Any]]:
+    """Load dashboard-ready Federal Register documents from SQLite."""
+    if not db_path.exists():
+        return []
+    clauses: list[str] = []
+    params: list[str] = []
+    if start_date:
+        clauses.append("publication_date >= ?")
+        params.append(start_date)
+    if end_date:
+        clauses.append("publication_date <= ?")
+        params.append(end_date)
+    for keyword in _split_keyword_query(keyword_query):
+        clauses.append(
+            """
+            (
+                LOWER(title) LIKE ?
+                OR LOWER(COALESCE(abstract, '')) LIKE ?
+                OR LOWER(COALESCE(action, '')) LIKE ?
+                OR LOWER(COALESCE(document_type, '')) LIKE ?
+                OR LOWER(COALESCE(agency_names, '')) LIKE ?
+                OR LOWER(matched_keywords) LIKE ?
+            )
+            """
+        )
+        like_keyword = f"%{keyword}%"
+        params.extend(
+            [like_keyword, like_keyword, like_keyword, like_keyword, like_keyword, like_keyword]
+        )
+
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            f"""
+            SELECT
+                document_number,
+                title,
+                document_type,
+                agency_names,
+                docket_id,
+                publication_date,
+                abstract,
+                action,
+                matched_keywords,
+                html_url,
+                pdf_url,
+                raw_text_url,
+                refreshed_at
+            FROM federal_register_documents
+            {where_sql}
+            ORDER BY publication_date DESC
+            """,
+            params,
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def _bill_record(bill: dict[str, Any], refreshed_at: str) -> tuple[Any, ...]:
     latest_action = bill.get("latestAction") if isinstance(bill.get("latestAction"), dict) else {}
     congress = int(bill["congress"])
@@ -421,6 +580,28 @@ def _regulatory_document_record(document: dict[str, Any], refreshed_at: str) -> 
         attributes.get("docAbstract", ""),
         json.dumps(document.get("matchedKeywords", [])),
         links.get("self", ""),
+        json.dumps(document, sort_keys=True),
+        refreshed_at,
+    )
+
+
+def _federal_register_document_record(
+    document: dict[str, Any],
+    refreshed_at: str,
+) -> tuple[Any, ...]:
+    return (
+        str(document["document_number"]),
+        document.get("title", ""),
+        document.get("type", ""),
+        json.dumps(document.get("agency_names", [])),
+        document.get("docket_id", ""),
+        document.get("publication_date"),
+        document.get("abstract", ""),
+        document.get("action", ""),
+        json.dumps(document.get("matchedKeywords", [])),
+        document.get("html_url", ""),
+        document.get("pdf_url", ""),
+        document.get("raw_text_url", ""),
         json.dumps(document, sort_keys=True),
         refreshed_at,
     )
