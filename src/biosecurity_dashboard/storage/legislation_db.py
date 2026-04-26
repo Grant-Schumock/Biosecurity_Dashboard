@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -51,6 +52,7 @@ def initialize_database(db_path: Path = DEFAULT_DB_PATH) -> None:
                 document_type TEXT,
                 agency_id TEXT,
                 docket_id TEXT,
+                normalized_docket_id TEXT,
                 posted_date TEXT,
                 comment_start_date TEXT,
                 comment_end_date TEXT,
@@ -67,6 +69,7 @@ def initialize_database(db_path: Path = DEFAULT_DB_PATH) -> None:
                 document_type TEXT,
                 agency_names TEXT,
                 docket_id TEXT,
+                normalized_docket_id TEXT,
                 publication_date TEXT,
                 abstract TEXT,
                 action TEXT,
@@ -79,6 +82,8 @@ def initialize_database(db_path: Path = DEFAULT_DB_PATH) -> None:
             );
             """
         )
+        _ensure_column(connection, "regulatory_documents", "normalized_docket_id", "TEXT")
+        _ensure_column(connection, "federal_register_documents", "normalized_docket_id", "TEXT")
 
 
 def upsert_congress_payload(payload: dict[str, Any], db_path: Path = DEFAULT_DB_PATH) -> int:
@@ -174,6 +179,7 @@ def upsert_regulations_payload(payload: dict[str, Any], db_path: Path = DEFAULT_
                     document_type,
                     agency_id,
                     docket_id,
+                    normalized_docket_id,
                     posted_date,
                     comment_start_date,
                     comment_end_date,
@@ -183,12 +189,13 @@ def upsert_regulations_payload(payload: dict[str, Any], db_path: Path = DEFAULT_
                     raw_json,
                     refreshed_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(document_id) DO UPDATE SET
                     title = excluded.title,
                     document_type = excluded.document_type,
                     agency_id = excluded.agency_id,
                     docket_id = excluded.docket_id,
+                    normalized_docket_id = excluded.normalized_docket_id,
                     posted_date = excluded.posted_date,
                     comment_start_date = excluded.comment_start_date,
                     comment_end_date = excluded.comment_end_date,
@@ -251,6 +258,7 @@ def upsert_federal_register_payload(payload: dict[str, Any], db_path: Path = DEF
                     document_type,
                     agency_names,
                     docket_id,
+                    normalized_docket_id,
                     publication_date,
                     abstract,
                     action,
@@ -261,12 +269,13 @@ def upsert_federal_register_payload(payload: dict[str, Any], db_path: Path = DEF
                     raw_json,
                     refreshed_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(document_number) DO UPDATE SET
                     title = excluded.title,
                     document_type = excluded.document_type,
                     agency_names = excluded.agency_names,
                     docket_id = excluded.docket_id,
+                    normalized_docket_id = excluded.normalized_docket_id,
                     publication_date = excluded.publication_date,
                     abstract = excluded.abstract,
                     action = excluded.action,
@@ -372,6 +381,63 @@ def load_bills(
     return [dict(row) for row in rows]
 
 
+def load_grouped_records(
+    sources: tuple[str, ...],
+    start_date: str | None = None,
+    end_date: str | None = None,
+    keyword_query: str | None = None,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> list[dict[str, Any]]:
+    """Load records grouped by normalized docket when possible."""
+    records: list[dict[str, Any]] = []
+    if "Congress.gov" in sources:
+        records.extend(_bill_group_record(bill) for bill in load_bills(start_date, end_date, keyword_query, db_path))
+    if "Regulations.gov" in sources:
+        records.extend(
+            _regulatory_group_record(document)
+            for document in load_regulatory_documents(start_date, end_date, keyword_query, db_path)
+        )
+    if "Federal Register" in sources:
+        records.extend(
+            _federal_register_group_record(document)
+            for document in load_federal_register_documents(start_date, end_date, keyword_query, db_path)
+        )
+
+    groups: dict[str, dict[str, Any]] = {}
+    for record in records:
+        group_key = record["normalized_docket_id"] or f"{record['source']}:{record['record_id']}"
+        group = groups.setdefault(
+            group_key,
+            {
+                "group_key": group_key,
+                "docket": record["docket_id"],
+                "normalized_docket_id": record["normalized_docket_id"],
+                "title": record["title"],
+                "sources": set(),
+                "record_count": 0,
+                "latest_date": record["date"],
+                "matched_keywords": set(),
+                "records": [],
+            },
+        )
+        group["sources"].add(record["source"])
+        group["record_count"] += 1
+        group["records"].append(record)
+        group["matched_keywords"].update(record["matched_keywords"])
+        if record["date"] and (not group["latest_date"] or record["date"] > group["latest_date"]):
+            group["latest_date"] = record["date"]
+            group["title"] = record["title"] or group["title"]
+            group["docket"] = record["docket_id"] or group["docket"]
+
+    grouped_records = []
+    for group in groups.values():
+        group["sources"] = sorted(group["sources"])
+        group["matched_keywords"] = sorted(group["matched_keywords"])
+        group["records"].sort(key=lambda record: record["date"] or "", reverse=True)
+        grouped_records.append(group)
+    return sorted(grouped_records, key=lambda group: group["latest_date"] or "", reverse=True)
+
+
 def _split_keyword_query(keyword_query: str | None) -> list[str]:
     if not keyword_query:
         return []
@@ -447,6 +513,7 @@ def load_regulatory_documents(
                 document_type,
                 agency_id,
                 docket_id,
+                normalized_docket_id,
                 posted_date,
                 comment_start_date,
                 comment_end_date,
@@ -509,6 +576,7 @@ def load_federal_register_documents(
                 document_type,
                 agency_names,
                 docket_id,
+                normalized_docket_id,
                 publication_date,
                 abstract,
                 action,
@@ -524,6 +592,22 @@ def load_federal_register_documents(
             params,
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def normalize_docket_id(value: str | None) -> str:
+    """Normalize agency docket numbers across source-specific formatting."""
+    if not value:
+        return ""
+    text = str(value).upper()
+    text = re.sub(r"\bDOCKET\s+(?:NO|NUMBER|ID)\.?\b", " ", text)
+    text = re.sub(r"\bDOCKET\b", " ", text)
+    text = re.sub(r"\bNO\.\b", " ", text)
+    docket_like = re.search(r"\b[A-Z]{2,}(?:-[A-Z0-9]+)*-\d{4}-\d{3,}\b", text)
+    if docket_like:
+        return docket_like.group(0)
+    text = re.sub(r"[^A-Z0-9]+", "-", text)
+    text = re.sub(r"-+", "-", text).strip("-")
+    return text
 
 
 def _bill_record(bill: dict[str, Any], refreshed_at: str) -> tuple[Any, ...]:
@@ -568,12 +652,14 @@ def _regulatory_document_record(document: dict[str, Any], refreshed_at: str) -> 
     links = document.get("links")
     if not isinstance(links, dict):
         links = {}
+    docket_id = attributes.get("docketId", "")
     return (
         str(document["id"]),
         attributes.get("title", ""),
         attributes.get("documentType", ""),
         attributes.get("agencyId", ""),
-        attributes.get("docketId", ""),
+        docket_id,
+        normalize_docket_id(docket_id),
         attributes.get("postedDate"),
         attributes.get("commentStartDate"),
         attributes.get("commentEndDate"),
@@ -589,12 +675,14 @@ def _federal_register_document_record(
     document: dict[str, Any],
     refreshed_at: str,
 ) -> tuple[Any, ...]:
+    docket_id = _federal_register_docket_id(document)
     return (
         str(document["document_number"]),
         document.get("title", ""),
         document.get("type", ""),
         json.dumps(document.get("agency_names", [])),
-        document.get("docket_id", ""),
+        docket_id,
+        normalize_docket_id(docket_id),
         document.get("publication_date"),
         document.get("abstract", ""),
         document.get("action", ""),
@@ -605,3 +693,88 @@ def _federal_register_document_record(
         json.dumps(document, sort_keys=True),
         refreshed_at,
     )
+
+
+def _federal_register_docket_id(document: dict[str, Any]) -> str:
+    docket_id = document.get("docket_id", "")
+    if docket_id:
+        return str(docket_id)
+    docket_ids = document.get("docket_ids", [])
+    if isinstance(docket_ids, list) and docket_ids:
+        return str(docket_ids[0])
+    return ""
+
+
+def _ensure_column(connection: sqlite3.Connection, table_name: str, column_name: str, sql_type: str) -> None:
+    columns = {
+        row[1]
+        for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+    if column_name not in columns:
+        connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {sql_type}")
+
+
+def _safe_json_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed if item]
+
+
+def _bill_group_record(bill: dict[str, Any]) -> dict[str, Any]:
+    date_value = bill["update_date"] or bill["introduced_date"] or bill["latest_action_date"] or ""
+    return {
+        "source": "Congress.gov",
+        "record_id": bill["bill_id"],
+        "title": bill["title"],
+        "date": date_value,
+        "docket_id": "",
+        "normalized_docket_id": "",
+        "document_type": "Bill",
+        "agency": "",
+        "matched_keywords": _safe_json_list(bill["matched_keywords"]),
+        "url": bill["api_url"],
+        "detail": f"{bill['bill_type']} {bill['bill_number']}",
+    }
+
+
+def _regulatory_group_record(document: dict[str, Any]) -> dict[str, Any]:
+    docket_id = document["docket_id"] or ""
+    normalized_docket_id = document["normalized_docket_id"] or normalize_docket_id(docket_id)
+    return {
+        "source": "Regulations.gov",
+        "record_id": document["document_id"],
+        "title": document["title"],
+        "date": document["posted_date"] or "",
+        "docket_id": docket_id,
+        "normalized_docket_id": normalized_docket_id,
+        "document_type": document["document_type"],
+        "agency": document["agency_id"],
+        "matched_keywords": _safe_json_list(document["matched_keywords"]),
+        "url": document["api_url"],
+        "detail": document["document_id"],
+    }
+
+
+def _federal_register_group_record(document: dict[str, Any]) -> dict[str, Any]:
+    agency_names = _safe_json_list(document["agency_names"])
+    docket_id = document["docket_id"] or ""
+    normalized_docket_id = document["normalized_docket_id"] or normalize_docket_id(docket_id)
+    return {
+        "source": "Federal Register",
+        "record_id": document["document_number"],
+        "title": document["title"],
+        "date": document["publication_date"] or "",
+        "docket_id": docket_id,
+        "normalized_docket_id": normalized_docket_id,
+        "document_type": document["document_type"],
+        "agency": ", ".join(agency_names),
+        "matched_keywords": _safe_json_list(document["matched_keywords"]),
+        "url": document["html_url"],
+        "detail": document["document_number"],
+    }

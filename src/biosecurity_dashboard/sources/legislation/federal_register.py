@@ -47,36 +47,36 @@ def fetch_matching_documents(
     raw_pages: list[dict[str, Any]] = []
     matches_by_id: dict[str, dict[str, Any]] = {}
     total_documents_seen = 0
+    search_term = build_or_search_query(search.keywords)
 
-    for keyword in search.keywords:
-        for page_number in range(1, search.max_pages + 1):
-            page = _get_json(
-                f"{base_url}/documents.json",
-                {
-                    "conditions[term]": keyword,
-                    "conditions[publication_date][gte]": search.start_date.isoformat(),
-                    "conditions[publication_date][lte]": end_date.isoformat(),
-                    "per_page": search.per_page,
-                    "page": page_number,
-                    "order": search.order,
-                },
+    for page_number in range(1, search.max_pages + 1):
+        page = _get_json(
+            f"{base_url}/documents.json",
+            {
+                "conditions[term]": search_term,
+                "conditions[publication_date][gte]": search.start_date.isoformat(),
+                "conditions[publication_date][lte]": end_date.isoformat(),
+                "per_page": search.per_page,
+                "page": page_number,
+                "order": search.order,
+            },
+        )
+        raw_pages.append(page)
+        documents = page.get("results", [])
+        if not isinstance(documents, list):
+            raise FederalRegisterApiError(
+                "Unexpected FederalRegister.gov response: 'results' was not a list."
             )
-            raw_pages.append(page)
-            documents = page.get("results", [])
-            if not isinstance(documents, list):
-                raise FederalRegisterApiError(
-                    "Unexpected FederalRegister.gov response: 'results' was not a list."
-                )
-            total_documents_seen += len(documents)
+        total_documents_seen += len(documents)
 
-            for document in documents:
-                matched_terms = matching_keywords(document, search.keywords)
-                if matched_terms:
-                    document["matchedKeywords"] = matched_terms
-                    matches_by_id[str(document["document_number"])] = document
+        for document in documents:
+            matched_terms = matching_keywords(document, search.keywords)
+            if matched_terms:
+                document["matchedKeywords"] = matched_terms
+                matches_by_id[str(document["document_number"])] = document
 
-            if len(documents) < search.per_page:
-                break
+        if len(documents) < search.per_page:
+            break
 
     matches = list(matches_by_id.values())
     return {
@@ -103,6 +103,15 @@ def matching_keywords(document: dict[str, Any], keywords: tuple[str, ...]) -> li
     return [keyword for keyword in keywords if _keyword_expression_matches(keyword, haystack)]
 
 
+def build_or_search_query(keywords: tuple[str, ...]) -> str:
+    """Build one broad OR query for the remote search endpoint."""
+    terms = []
+    for keyword in keywords:
+        terms.extend(_keyword_terms(keyword))
+    unique_terms = list(dict.fromkeys(term for term in terms if term))
+    return " OR ".join(_quote_search_term(term) for term in unique_terms)
+
+
 def _document_match_text(document: dict[str, Any]) -> str:
     agencies = document.get("agency_names") or []
     topics = document.get("topics") or []
@@ -120,9 +129,20 @@ def _document_match_text(document: dict[str, Any]) -> str:
 
 
 def _keyword_expression_matches(keyword: str, haystack: str) -> bool:
-    terms = [term.strip().casefold() for term in re.split(r"\s+AND\s+", keyword, flags=re.I)]
-    terms = [term for term in terms if term]
-    return bool(terms) and all(term in haystack for term in terms)
+    terms = _keyword_terms(keyword)
+    return bool(terms) and any(term.casefold() in haystack for term in terms)
+
+
+def _keyword_terms(keyword: str) -> list[str]:
+    return [
+        term.strip().strip('"')
+        for term in re.split(r"\s+(?:AND|OR)\s+", keyword, flags=re.I)
+        if term.strip().strip('"')
+    ]
+
+
+def _quote_search_term(term: str) -> str:
+    return f'"{term}"' if " " in term else term
 
 
 def _clean_text(value: str) -> str:

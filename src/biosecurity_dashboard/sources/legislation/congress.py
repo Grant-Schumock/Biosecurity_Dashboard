@@ -185,9 +185,16 @@ def _bill_match_text(bill: dict[str, Any]) -> str:
 
 
 def _keyword_expression_matches(keyword: str, haystack: str) -> bool:
-    terms = [term.strip().casefold() for term in re.split(r"\s+AND\s+", keyword, flags=re.I)]
-    terms = [term for term in terms if term]
-    return bool(terms) and all(term in haystack for term in terms)
+    terms = _keyword_terms(keyword)
+    return bool(terms) and all(term.casefold() in haystack for term in terms)
+
+
+def _keyword_terms(keyword: str) -> list[str]:
+    return [
+        term.strip().strip('"')
+        for term in re.split(r"\s+AND\s+", keyword, flags=re.I)
+        if term.strip().strip('"')
+    ]
 
 
 def _clean_text(value: str) -> str:

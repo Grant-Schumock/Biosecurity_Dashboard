@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from datetime import date, timedelta
 from typing import Any
 
@@ -10,7 +9,6 @@ import streamlit as st
 
 from biosecurity_dashboard.sources.legislation.congress import (
     DEFAULT_KEYWORDS,
-    DEFAULT_START_DATE,
     CongressApiError,
     CongressBillSearch,
     fetch_matching_bills,
@@ -29,9 +27,7 @@ from biosecurity_dashboard.sources.legislation.regulations import (
 )
 from biosecurity_dashboard.storage.legislation_db import (
     get_refresh_metadata,
-    load_bills,
-    load_federal_register_documents,
-    load_regulatory_documents,
+    load_grouped_records,
     upsert_congress_payload,
     upsert_federal_register_payload,
     upsert_regulations_payload,
@@ -56,16 +52,23 @@ def render_legislation_tab() -> None:
         congress_refresh = get_refresh_metadata("congress.gov")
         regulations_refresh = get_refresh_metadata("regulations.gov")
         federal_register_refresh = get_refresh_metadata("federalregister.gov")
-        st.caption(f"Congress refresh: {_refresh_label(congress_refresh)}")
-        st.caption(f"Regulations.gov refresh: {_refresh_label(regulations_refresh)}")
-        st.caption(f"Federal Register refresh: {_refresh_label(federal_register_refresh)}")
+        refresh_button_column, refresh_info_column = st.columns([1, 1.4], gap="small")
+        with refresh_button_column:
+            refresh_all = st.button("Refresh Data", type="primary", use_container_width=True)
+        with refresh_info_column:
+            st.info(
+                "Last Data Refresh\n\n"
+                f"Congress: {_refresh_label(congress_refresh)}\n\n"
+                f"Regulations.gov: {_refresh_label(regulations_refresh)}\n\n"
+                f"Federal Register: {_refresh_label(federal_register_refresh)}"
+            )
 
-        date_range = st.date_input(
-            "Dashboard date range",
-            value=(default_start, today),
-            max_value=today,
-        )
-        start_date, end_date = _normalize_date_range(date_range, default_start, today)
+        st.markdown("**Date Range**")
+        start_date = st.date_input("Start", value=default_start, max_value=today)
+        end_date = st.date_input("End", value=today, max_value=today)
+        if start_date > end_date:
+            st.warning("Start date is after end date; swapping them for this query.")
+            start_date, end_date = end_date, start_date
 
         source_filter = st.multiselect(
             "Sources",
@@ -74,70 +77,55 @@ def render_legislation_tab() -> None:
         )
         keyword_query = st.text_input("Search local database")
 
-        keywords = st.text_area(
-            "Refresh keywords",
-            value="\n".join(DEFAULT_KEYWORDS),
-            height=260,
-        )
         max_pages = st.number_input(
-            "Max pages per Congress",
+            "Max pages per source",
             min_value=1,
             max_value=500,
             value=200,
         )
-        refresh_congress = st.button("Refresh Congress Data", type="primary", use_container_width=True)
-        refresh_regulations = st.button("Refresh Regulations.gov Data", use_container_width=True)
-        refresh_federal_register = st.button(
-            "Refresh Federal Register Data",
-            use_container_width=True,
-        )
 
-    if refresh_congress:
-        refresh_congress_data(_split_terms(keywords), int(max_pages))
-    if refresh_regulations:
-        refresh_regulations_data(_split_terms(keywords), int(max_pages))
-    if refresh_federal_register:
-        refresh_federal_register_data(_split_terms(keywords), int(max_pages))
+    if refresh_all:
+        refresh_all_data(int(max_pages), start_date, end_date)
 
     with results:
-        rows: list[dict[str, Any]] = []
-        if "Congress.gov" in source_filter:
-            rows.extend(
-                _bill_row(bill)
-                for bill in load_bills(start_date.isoformat(), end_date.isoformat(), keyword_query)
-            )
-        if "Regulations.gov" in source_filter:
-            rows.extend(
-                _regulatory_document_row(document)
-                for document in load_regulatory_documents(
-                    start_date.isoformat(),
-                    end_date.isoformat(),
-                    keyword_query,
-                )
-            )
-        if "Federal Register" in source_filter:
-            rows.extend(
-                _federal_register_document_row(document)
-                for document in load_federal_register_documents(
-                    start_date.isoformat(),
-                    end_date.isoformat(),
-                    keyword_query,
-                )
-            )
+        groups = load_grouped_records(
+            tuple(source_filter),
+            start_date.isoformat(),
+            end_date.isoformat(),
+            keyword_query,
+        )
         st.caption(f"Showing locally stored legislation for {start_date:%Y-%m-%d} to {end_date:%Y-%m-%d}.")
-        if not rows:
+        if not groups:
             st.info("No locally stored bills match these filters.")
             return
 
-        st.dataframe(rows, use_container_width=True)
+        st.dataframe([_group_row(group) for group in groups], use_container_width=True)
+        for group in groups:
+            with st.expander(f"{group['docket'] or group['title']} ({group['record_count']} entries)"):
+                st.dataframe(
+                    [_source_record_row(record) for record in group["records"]],
+                    use_container_width=True,
+                )
 
 
-def refresh_congress_data(keywords: tuple[str, ...], max_pages_per_congress: int) -> None:
+def refresh_all_data(max_pages: int, start_date: date, end_date: date) -> None:
+    keywords = DEFAULT_KEYWORDS
+    refresh_congress_data(keywords, max_pages, start_date, end_date)
+    refresh_regulations_data(keywords, max_pages, start_date, end_date)
+    refresh_federal_register_data(keywords, max_pages, start_date, end_date)
+
+
+def refresh_congress_data(
+    keywords: tuple[str, ...],
+    max_pages_per_congress: int,
+    start_date: date,
+    end_date: date,
+) -> None:
     search = CongressBillSearch(
         keywords=keywords,
         max_pages_per_congress=max_pages_per_congress,
-        start_date=DEFAULT_START_DATE,
-        end_date=date.today(),
+        start_date=start_date,
+        end_date=end_date,
     )
     try:
         payload = fetch_matching_bills(api_key=get_api_key(), search=search)
@@ -153,12 +141,17 @@ def refresh_congress_data(keywords: tuple[str, ...], max_pages_per_congress: int
     )
 
 
-def refresh_regulations_data(keywords: tuple[str, ...], max_pages: int) -> None:
+def refresh_regulations_data(
+    keywords: tuple[str, ...],
+    max_pages: int,
+    start_date: date,
+    end_date: date,
+) -> None:
     search = RegulationsDocumentSearch(
         keywords=keywords,
         max_pages=max_pages,
-        start_date=DEFAULT_START_DATE,
-        end_date=date.today(),
+        start_date=start_date,
+        end_date=end_date,
     )
     try:
         payload = fetch_matching_documents(api_key=get_regulations_api_key(), search=search)
@@ -174,12 +167,17 @@ def refresh_regulations_data(keywords: tuple[str, ...], max_pages: int) -> None:
     )
 
 
-def refresh_federal_register_data(keywords: tuple[str, ...], max_pages: int) -> None:
+def refresh_federal_register_data(
+    keywords: tuple[str, ...],
+    max_pages: int,
+    start_date: date,
+    end_date: date,
+) -> None:
     search = FederalRegisterDocumentSearch(
         keywords=keywords,
         max_pages=max_pages,
-        start_date=DEFAULT_START_DATE,
-        end_date=date.today(),
+        start_date=start_date,
+        end_date=end_date,
     )
     try:
         payload = fetch_matching_federal_register_documents(search=search)
@@ -195,82 +193,33 @@ def refresh_federal_register_data(keywords: tuple[str, ...], max_pages: int) -> 
     )
 
 
-def _bill_row(bill: dict[str, Any]) -> dict[str, Any]:
+def _group_row(group: dict[str, Any]) -> dict[str, Any]:
     return {
-        "Source": "Congress.gov",
-        "Bill": f"{bill['bill_type']} {bill['bill_number']}",
-        "Title": bill["title"],
-        "Congress": bill["congress"],
-        "Introduced": bill["introduced_date"],
-        "Updated": bill["update_date"],
-        "Posted": "",
-        "Agency": "",
-        "Docket": "",
-        "Document number": "",
-        "Document type": "",
-        "Latest action": bill["latest_action_text"],
-        "Matched keywords": ", ".join(json.loads(bill["matched_keywords"])),
-        "API URL": bill["api_url"],
+        "Docket": group["docket"],
+        "Title": group["title"],
+        "Sources": ", ".join(group["sources"]),
+        "Entries": group["record_count"],
+        "Latest date": group["latest_date"],
+        "Matched keywords": ", ".join(group["matched_keywords"]),
     }
 
 
-def _regulatory_document_row(document: dict[str, Any]) -> dict[str, Any]:
+def _source_record_row(record: dict[str, Any]) -> dict[str, Any]:
     return {
-        "Source": "Regulations.gov",
-        "Bill": "",
-        "Title": document["title"],
-        "Congress": "",
-        "Introduced": "",
-        "Updated": "",
-        "Posted": document["posted_date"],
-        "Agency": document["agency_id"],
-        "Docket": document["docket_id"],
-        "Document number": document["document_id"],
-        "Document type": document["document_type"],
-        "Latest action": "",
-        "Matched keywords": ", ".join(json.loads(document["matched_keywords"])),
-        "API URL": document["api_url"],
-    }
-
-
-def _federal_register_document_row(document: dict[str, Any]) -> dict[str, Any]:
-    agency_names = json.loads(document["agency_names"]) if document["agency_names"] else []
-    return {
-        "Source": "Federal Register",
-        "Bill": "",
-        "Title": document["title"],
-        "Congress": "",
-        "Introduced": "",
-        "Updated": "",
-        "Posted": document["publication_date"],
-        "Agency": ", ".join(agency_names),
-        "Docket": document["docket_id"],
-        "Document number": document["document_number"],
-        "Document type": document["document_type"],
-        "Latest action": document["action"],
-        "Matched keywords": ", ".join(json.loads(document["matched_keywords"])),
-        "API URL": document["html_url"],
+        "Source": record["source"],
+        "ID": record["detail"],
+        "Title": record["title"],
+        "Date": record["date"],
+        "Agency": record["agency"],
+        "Docket": record["docket_id"],
+        "Document type": record["document_type"],
+        "Matched keywords": ", ".join(record["matched_keywords"]),
+        "URL": record["url"],
     }
 
 
 def _refresh_label(refresh_metadata: dict[str, Any] | None) -> str:
     return refresh_metadata["refreshed_at"] if refresh_metadata else "never"
-
-
-def _split_terms(value: str) -> tuple[str, ...]:
-    return tuple(line.strip().strip('"') for line in value.splitlines() if line.strip())
-
-
-def _normalize_date_range(
-    value: date | tuple[date, date] | list[date],
-    default_start: date,
-    default_end: date,
-) -> tuple[date, date]:
-    if isinstance(value, date):
-        return value, value
-    if len(value) == 2:
-        return value[0], value[1]
-    return default_start, default_end
 
 
 if __name__ == "__main__":
