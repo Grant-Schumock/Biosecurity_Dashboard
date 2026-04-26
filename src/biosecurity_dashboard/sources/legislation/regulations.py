@@ -6,6 +6,8 @@ import html
 import json
 import os
 import re
+import socket
+import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any
@@ -20,6 +22,8 @@ from biosecurity_dashboard.sources.legislation.congress import (
 
 
 DEFAULT_BASE_URL = "https://api.regulations.gov/v4"
+REQUEST_TIMEOUT_SECONDS = 20
+REQUEST_RETRIES = 2
 
 
 class RegulationsApiError(RuntimeError):
@@ -82,7 +86,10 @@ def fetch_matching_documents(
         total_documents_seen += len(documents)
 
         for document in documents:
-            enriched = fetch_document_detail(api_key, document, base_url=base_url)
+            try:
+                enriched = fetch_document_detail(api_key, document, base_url=base_url)
+            except RegulationsApiError as exc:
+                enriched = {**document, "detailError": str(exc)}
             matched_terms = matching_keywords(enriched, search.keywords)
             if matched_terms:
                 enriched["matchedKeywords"] = matched_terms
@@ -108,6 +115,39 @@ def fetch_matching_documents(
         "matches": matches,
         "raw_pages": raw_pages,
     }
+
+
+def fetch_recent_document(
+    api_key: str,
+    base_url: str = DEFAULT_BASE_URL,
+) -> dict[str, Any]:
+    """Fetch one recent Regulations.gov document and enrich it with details."""
+    page = _get_json(
+        f"{base_url}/documents",
+        {
+            "page[size]": 1,
+            "page[number]": 1,
+            "sort": "-postedDate",
+        },
+        api_key,
+    )
+    documents = page.get("data", [])
+    if not isinstance(documents, list) or not documents:
+        raise RegulationsApiError("No recent Regulations.gov documents returned.")
+    return fetch_document_detail(api_key, documents[0], base_url=base_url)
+
+
+def fetch_document(
+    api_key: str,
+    document_id: str,
+    base_url: str = DEFAULT_BASE_URL,
+) -> dict[str, Any]:
+    """Fetch one Regulations.gov document by ID."""
+    detail = _get_json(f"{base_url}/documents/{document_id}", {}, api_key)
+    data = detail.get("data")
+    if not isinstance(data, dict):
+        raise RegulationsApiError(f"No document returned for {document_id}.")
+    return data
 
 
 def fetch_document_detail(
@@ -197,14 +237,7 @@ def _get_json(url: str, params: dict[str, Any], api_key: str) -> dict[str, Any]:
             "X-Api-Key": api_key,
         },
     )
-    try:
-        with urlopen(request, timeout=30) as response:
-            body = response.read().decode("utf-8")
-    except HTTPError as exc:
-        message = exc.read().decode("utf-8", errors="replace")
-        raise RegulationsApiError(f"Regulations.gov request failed: {exc.code} {message}") from exc
-    except URLError as exc:
-        raise RegulationsApiError(f"Regulations.gov request failed: {exc.reason}") from exc
+    body = _read_request(request, "Regulations.gov request")
 
     try:
         parsed = json.loads(body)
@@ -213,3 +246,21 @@ def _get_json(url: str, params: dict[str, Any], api_key: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise RegulationsApiError("Regulations.gov returned an unexpected JSON shape.")
     return parsed
+
+
+def _read_request(request: Request, label: str) -> str:
+    last_error: Exception | None = None
+    for attempt in range(1, REQUEST_RETRIES + 1):
+        try:
+            with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+                charset = response.headers.get_content_charset() or "utf-8"
+                return response.read().decode(charset, errors="replace")
+        except HTTPError as exc:
+            message = exc.read().decode("utf-8", errors="replace")
+            raise RegulationsApiError(f"{label} failed: {exc.code} {message}") from exc
+        except (TimeoutError, socket.timeout, URLError) as exc:
+            last_error = exc
+            if attempt < REQUEST_RETRIES:
+                time.sleep(attempt)
+                continue
+    raise RegulationsApiError(f"{label} failed after {REQUEST_RETRIES} attempts: {last_error}")

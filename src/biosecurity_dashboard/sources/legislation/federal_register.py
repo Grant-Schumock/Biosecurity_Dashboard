@@ -5,6 +5,8 @@ from __future__ import annotations
 import html
 import json
 import re
+import socket
+import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any
@@ -19,6 +21,8 @@ from biosecurity_dashboard.sources.legislation.congress import (
 
 
 DEFAULT_BASE_URL = "https://www.federalregister.gov/api/v1"
+REQUEST_TIMEOUT_SECONDS = 20
+REQUEST_RETRIES = 2
 
 
 class FederalRegisterApiError(RuntimeError):
@@ -97,6 +101,33 @@ def fetch_matching_documents(
     }
 
 
+def fetch_recent_document(base_url: str = DEFAULT_BASE_URL) -> dict[str, Any]:
+    """Fetch one recent Federal Register document."""
+    page = _get_json(
+        f"{base_url}/documents.json",
+        {
+            "per_page": 1,
+            "page": 1,
+            "order": "newest",
+        },
+    )
+    documents = page.get("results", [])
+    if not isinstance(documents, list) or not documents:
+        raise FederalRegisterApiError("No recent Federal Register documents returned.")
+    return documents[0]
+
+
+def fetch_document(
+    document_number: str,
+    base_url: str = DEFAULT_BASE_URL,
+) -> dict[str, Any]:
+    """Fetch one Federal Register document by document number."""
+    document = _get_json(f"{base_url}/documents/{document_number}.json", {})
+    if not document.get("document_number"):
+        raise FederalRegisterApiError(f"No document returned for {document_number}.")
+    return document
+
+
 def matching_keywords(document: dict[str, Any], keywords: tuple[str, ...]) -> list[str]:
     """Return keyword expressions that match a Federal Register document."""
     haystack = _document_match_text(document)
@@ -153,16 +184,7 @@ def _clean_text(value: str) -> str:
 def _get_json(url: str, params: dict[str, Any]) -> dict[str, Any]:
     request_url = f"{url}?{urlencode(params)}"
     request = Request(request_url, headers={"User-Agent": "biosecurity-dashboard/0.1"})
-    try:
-        with urlopen(request, timeout=30) as response:
-            body = response.read().decode("utf-8")
-    except HTTPError as exc:
-        message = exc.read().decode("utf-8", errors="replace")
-        raise FederalRegisterApiError(
-            f"FederalRegister.gov request failed: {exc.code} {message}"
-        ) from exc
-    except URLError as exc:
-        raise FederalRegisterApiError(f"FederalRegister.gov request failed: {exc.reason}") from exc
+    body = _read_request(request, "FederalRegister.gov request")
 
     try:
         parsed = json.loads(body)
@@ -171,3 +193,21 @@ def _get_json(url: str, params: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise FederalRegisterApiError("FederalRegister.gov returned an unexpected JSON shape.")
     return parsed
+
+
+def _read_request(request: Request, label: str) -> str:
+    last_error: Exception | None = None
+    for attempt in range(1, REQUEST_RETRIES + 1):
+        try:
+            with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+                charset = response.headers.get_content_charset() or "utf-8"
+                return response.read().decode(charset, errors="replace")
+        except HTTPError as exc:
+            message = exc.read().decode("utf-8", errors="replace")
+            raise FederalRegisterApiError(f"{label} failed: {exc.code} {message}") from exc
+        except (TimeoutError, socket.timeout, URLError) as exc:
+            last_error = exc
+            if attempt < REQUEST_RETRIES:
+                time.sleep(attempt)
+                continue
+    raise FederalRegisterApiError(f"{label} failed after {REQUEST_RETRIES} attempts: {last_error}")
