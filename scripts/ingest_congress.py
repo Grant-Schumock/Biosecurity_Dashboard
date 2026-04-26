@@ -39,14 +39,19 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     keywords = tuple(args.keywords) if args.keywords else DEFAULT_KEYWORDS
+    start_date = date.fromisoformat(args.start_date)
+    end_date = date.fromisoformat(args.end_date) if args.end_date else date.today()
+    if start_date > end_date:
+        raise SystemExit("--start-date must be on or before --end-date.")
+
     search = CongressBillSearch(
         limit=args.limit,
         max_bills=args.max_bills,
         max_api_calls=args.max_api_calls,
         max_pages_per_congress=args.max_pages_per_congress,
         keywords=keywords,
-        start_date=date.fromisoformat(args.start_date),
-        end_date=date.fromisoformat(args.end_date) if args.end_date else None,
+        start_date=start_date,
+        end_date=end_date,
         include_full_text=not args.skip_full_text,
     )
     payload = fetch_matching_bills(api_key=get_api_key(), search=search)
@@ -55,6 +60,7 @@ def main() -> None:
     print(
         f"Stored {saved_count} matched bills from "
         f"{metadata['total_bills_seen']} Congress.gov bills reviewed "
+        f"from {metadata['start_date']} to {metadata['end_date']} "
         f"using {metadata['api_calls_used']} API calls."
     )
     if not metadata.get("completed", True):

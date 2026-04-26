@@ -21,8 +21,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-pages", type=int, default=200)
     parser.add_argument("--max-records", type=int, default=1000)
     parser.add_argument("--max-api-calls", type=int, default=4000)
-    parser.add_argument("--start-date", default=DEFAULT_START_DATE.isoformat())
-    parser.add_argument("--end-date", default=None)
+    parser.add_argument(
+        "--start-date",
+        default=DEFAULT_START_DATE.isoformat(),
+        help="Earliest posted date to fetch, in YYYY-MM-DD format.",
+    )
+    parser.add_argument(
+        "--end-date",
+        default=None,
+        help="Latest posted date to fetch, in YYYY-MM-DD format. Defaults to today.",
+    )
     parser.add_argument(
         "--print-only",
         action="store_true",
@@ -40,21 +48,27 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     keywords = tuple(args.keywords) if args.keywords else DEFAULT_KEYWORDS
+    start_date = date.fromisoformat(args.start_date)
+    end_date = date.fromisoformat(args.end_date) if args.end_date else date.today()
+    if start_date > end_date:
+        raise SystemExit("--start-date must be on or before --end-date.")
+
     search = RegulationsDocumentSearch(
         limit=args.limit,
         max_pages=args.max_pages,
         max_records=args.max_records,
         max_api_calls=args.max_api_calls,
         keywords=keywords,
-        start_date=date.fromisoformat(args.start_date),
-        end_date=date.fromisoformat(args.end_date) if args.end_date else None,
+        start_date=start_date,
+        end_date=end_date,
     )
     payload = fetch_matching_documents(api_key=get_api_key(), search=search)
     if args.print_only:
         metadata = payload["metadata"]
         print(
             f"Matched {metadata['matched_documents']} Regulations.gov documents from "
-            f"{metadata['total_documents_seen']} documents reviewed."
+            f"{metadata['total_documents_seen']} documents reviewed "
+            f"from {metadata['start_date']} to {metadata['end_date']}."
         )
         print(json.dumps(payload["matches"], indent=2, sort_keys=True))
         return
@@ -64,6 +78,7 @@ def main() -> None:
     print(
         f"Stored {saved_count} matched regulatory documents from "
         f"{metadata['total_documents_seen']} Regulations.gov documents reviewed "
+        f"from {metadata['start_date']} to {metadata['end_date']} "
         f"using {metadata['api_calls_used']} API calls."
     )
     if not metadata.get("completed", True):

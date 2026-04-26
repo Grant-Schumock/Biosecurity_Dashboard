@@ -111,6 +111,8 @@ def fetch_matching_bills(
                     "limit": min(search.limit, search.max_bills - len(candidate_bills)),
                     "offset": offset,
                     "sort": search.sort,
+                    "fromDateTime": _congress_datetime(search.start_date, start_of_day=True),
+                    "toDateTime": _congress_datetime(end_date, start_of_day=False),
                 },
             )
         except CongressApiError as exc:
@@ -437,6 +439,11 @@ def _parse_date(value: Any) -> date | None:
         return date.fromisoformat(value[:10])
     except ValueError:
         return None
+
+
+def _congress_datetime(value: date, start_of_day: bool) -> str:
+    time_part = "00:00:00Z" if start_of_day else "23:59:59Z"
+    return f"{value.isoformat()}T{time_part}"
 
 
 def _get_windows_user_env(env_var: str) -> str:
