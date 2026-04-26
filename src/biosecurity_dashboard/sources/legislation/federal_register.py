@@ -74,6 +74,7 @@ def fetch_matching_documents(
         total_documents_seen += len(documents)
 
         for document in documents:
+            document = enrich_document_with_full_text(document)
             matched_terms = matching_keywords(document, search.keywords)
             if matched_terms:
                 document["matchedKeywords"] = matched_terms
@@ -101,6 +102,39 @@ def fetch_matching_documents(
     }
 
 
+def search_documents(
+    term: str,
+    start_date: date,
+    end_date: date,
+    per_page: int = 100,
+    max_pages: int = 10,
+    base_url: str = DEFAULT_BASE_URL,
+) -> list[dict[str, Any]]:
+    """Search Federal Register documents by API term and date range."""
+    documents: list[dict[str, Any]] = []
+    for page_number in range(1, max_pages + 1):
+        page = _get_json(
+            f"{base_url}/documents.json",
+            {
+                "conditions[term]": term,
+                "conditions[publication_date][gte]": start_date.isoformat(),
+                "conditions[publication_date][lte]": end_date.isoformat(),
+                "per_page": per_page,
+                "page": page_number,
+                "order": "newest",
+            },
+        )
+        page_documents = page.get("results", [])
+        if not isinstance(page_documents, list):
+            raise FederalRegisterApiError(
+                "Unexpected FederalRegister.gov response: 'results' was not a list."
+            )
+        documents.extend(page_documents)
+        if len(page_documents) < per_page:
+            break
+    return documents
+
+
 def fetch_recent_document(base_url: str = DEFAULT_BASE_URL) -> dict[str, Any]:
     """Fetch one recent Federal Register document."""
     page = _get_json(
@@ -114,7 +148,7 @@ def fetch_recent_document(base_url: str = DEFAULT_BASE_URL) -> dict[str, Any]:
     documents = page.get("results", [])
     if not isinstance(documents, list) or not documents:
         raise FederalRegisterApiError("No recent Federal Register documents returned.")
-    return documents[0]
+    return enrich_document_with_full_text(documents[0])
 
 
 def fetch_document(
@@ -125,7 +159,24 @@ def fetch_document(
     document = _get_json(f"{base_url}/documents/{document_number}.json", {})
     if not document.get("document_number"):
         raise FederalRegisterApiError(f"No document returned for {document_number}.")
-    return document
+    return enrich_document_with_full_text(document)
+
+
+def enrich_document_with_full_text(document: dict[str, Any]) -> dict[str, Any]:
+    """Attach best-effort full body text to a Federal Register document."""
+    text_url = _select_text_url(document)
+    if not text_url:
+        return {**document, "fullText": "", "selectedTextUrl": ""}
+    try:
+        full_text = _get_text(text_url)
+    except FederalRegisterApiError as exc:
+        return {
+            **document,
+            "fullText": "",
+            "selectedTextUrl": text_url,
+            "fullTextError": str(exc),
+        }
+    return {**document, "fullText": full_text, "selectedTextUrl": text_url}
 
 
 def matching_keywords(document: dict[str, Any], keywords: tuple[str, ...]) -> list[str]:
@@ -153,6 +204,7 @@ def _document_match_text(document: dict[str, Any]) -> str:
         document.get("action", ""),
         document.get("type", ""),
         document.get("docket_id", ""),
+        document.get("fullText", ""),
         " ".join(str(agency) for agency in agencies if agency),
         " ".join(str(topic) for topic in topics if topic),
     ]
@@ -181,6 +233,20 @@ def _clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", without_tags).strip().casefold()
 
 
+def _select_text_url(document: dict[str, Any]) -> str:
+    for field_name in (
+        "raw_text_url",
+        "full_text_xml_url",
+        "body_html_url",
+        "html_url",
+        "pdf_url",
+    ):
+        value = document.get(field_name)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
 def _get_json(url: str, params: dict[str, Any]) -> dict[str, Any]:
     request_url = f"{url}?{urlencode(params)}"
     request = Request(request_url, headers={"User-Agent": "biosecurity-dashboard/0.1"})
@@ -193,6 +259,11 @@ def _get_json(url: str, params: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise FederalRegisterApiError("FederalRegister.gov returned an unexpected JSON shape.")
     return parsed
+
+
+def _get_text(url: str) -> str:
+    request = Request(url, headers={"User-Agent": "biosecurity-dashboard/0.1"})
+    return _read_request(request, "FederalRegister.gov text download")
 
 
 def _read_request(request: Request, label: str) -> str:

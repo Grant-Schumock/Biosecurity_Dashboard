@@ -74,6 +74,7 @@ def initialize_database(db_path: Path = DEFAULT_DB_PATH) -> None:
                 publication_date TEXT,
                 abstract TEXT,
                 action TEXT,
+                full_text TEXT,
                 matched_keywords TEXT NOT NULL,
                 html_url TEXT,
                 pdf_url TEXT,
@@ -85,6 +86,7 @@ def initialize_database(db_path: Path = DEFAULT_DB_PATH) -> None:
         )
         _ensure_column(connection, "regulatory_documents", "normalized_docket_id", "TEXT")
         _ensure_column(connection, "federal_register_documents", "normalized_docket_id", "TEXT")
+        _ensure_column(connection, "federal_register_documents", "full_text", "TEXT")
         _ensure_column(connection, "bills", "full_text", "TEXT")
 
 
@@ -266,6 +268,7 @@ def upsert_federal_register_payload(payload: dict[str, Any], db_path: Path = DEF
                     publication_date,
                     abstract,
                     action,
+                    full_text,
                     matched_keywords,
                     html_url,
                     pdf_url,
@@ -273,7 +276,7 @@ def upsert_federal_register_payload(payload: dict[str, Any], db_path: Path = DEF
                     raw_json,
                     refreshed_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(document_number) DO UPDATE SET
                     title = excluded.title,
                     document_type = excluded.document_type,
@@ -283,6 +286,7 @@ def upsert_federal_register_payload(payload: dict[str, Any], db_path: Path = DEF
                     publication_date = excluded.publication_date,
                     abstract = excluded.abstract,
                     action = excluded.action,
+                    full_text = excluded.full_text,
                     matched_keywords = excluded.matched_keywords,
                     html_url = excluded.html_url,
                     pdf_url = excluded.pdf_url,
@@ -560,6 +564,7 @@ def load_federal_register_documents(
                 LOWER(title) LIKE ?
                 OR LOWER(COALESCE(abstract, '')) LIKE ?
                 OR LOWER(COALESCE(action, '')) LIKE ?
+                OR LOWER(COALESCE(full_text, '')) LIKE ?
                 OR LOWER(COALESCE(document_type, '')) LIKE ?
                 OR LOWER(COALESCE(agency_names, '')) LIKE ?
                 OR LOWER(matched_keywords) LIKE ?
@@ -567,9 +572,7 @@ def load_federal_register_documents(
             """
         )
         like_keyword = f"%{keyword}%"
-        params.extend(
-            [like_keyword, like_keyword, like_keyword, like_keyword, like_keyword, like_keyword]
-        )
+        params.extend([like_keyword] * 7)
 
     where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     with sqlite3.connect(db_path) as connection:
@@ -586,6 +589,7 @@ def load_federal_register_documents(
                 publication_date,
                 abstract,
                 action,
+                full_text,
                 matched_keywords,
                 html_url,
                 pdf_url,
@@ -693,6 +697,7 @@ def _federal_register_document_record(
         document.get("publication_date"),
         document.get("abstract", ""),
         document.get("action", ""),
+        document.get("fullText", ""),
         json.dumps(document.get("matchedKeywords", [])),
         document.get("html_url", ""),
         document.get("pdf_url", ""),

@@ -32,7 +32,10 @@ def main() -> None:
     print(f"Title: {document.get('title', '')}")
     print(f"Keyword: {keyword}")
     print(f"Matched: {bool(matches)}")
-    print("Matched fields are title, abstract, excerpts, action, type, docket_id, agency_names, and topics.")
+    print(
+        "Matched fields are title, abstract, excerpts, action, type, docket_id, "
+        "full text, agency_names, and topics."
+    )
 
 
 if __name__ == "__main__":
