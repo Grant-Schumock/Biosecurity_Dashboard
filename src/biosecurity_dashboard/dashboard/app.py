@@ -78,7 +78,7 @@ def main() -> None:
         """,
         unsafe_allow_html=True,
     )
-    st.title("Biosecurity Dashboard")
+    st.title("Biosecurity Policy Dashboard")
 
     render_legislation_tab()
 
