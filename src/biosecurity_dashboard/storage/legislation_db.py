@@ -752,6 +752,7 @@ def _bill_group_record(bill: dict[str, Any]) -> dict[str, Any]:
         "matched_keywords": _safe_json_list(bill["matched_keywords"]),
         "url": bill["api_url"],
         "detail": f"{bill['bill_type']} {bill['bill_number']}",
+        "abstract": bill.get("summary_text", ""),
     }
 
 
@@ -770,6 +771,7 @@ def _regulatory_group_record(document: dict[str, Any]) -> dict[str, Any]:
         "matched_keywords": _safe_json_list(document["matched_keywords"]),
         "url": document["api_url"],
         "detail": document["document_id"],
+        "abstract": document["abstract"] or "",
     }
 
 
@@ -789,4 +791,5 @@ def _federal_register_group_record(document: dict[str, Any]) -> dict[str, Any]:
         "matched_keywords": _safe_json_list(document["matched_keywords"]),
         "url": document["html_url"],
         "detail": document["document_number"],
+        "abstract": document["abstract"] or "",
     }

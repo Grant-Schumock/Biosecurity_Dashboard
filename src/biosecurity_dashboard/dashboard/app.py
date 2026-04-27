@@ -303,7 +303,7 @@ def _source_record_row(record: dict[str, Any]) -> dict[str, Any]:
         "Docket": record["docket_id"],
         "Document type": record["document_type"],
         "Matched keywords": ", ".join(record["matched_keywords"]),
-        "URL": record["url"],
+        "Abstract": record.get("abstract", ""),
     }
 
 
