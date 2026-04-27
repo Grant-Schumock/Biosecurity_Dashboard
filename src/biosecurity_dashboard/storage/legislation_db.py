@@ -342,10 +342,10 @@ def load_bills(
     clauses: list[str] = []
     params: list[str] = []
     if start_date:
-        clauses.append("COALESCE(introduced_date, update_date, latest_action_date) >= ?")
+        clauses.append("COALESCE(update_date, introduced_date, latest_action_date) >= ?")
         params.append(start_date)
     if end_date:
-        clauses.append("COALESCE(introduced_date, update_date, latest_action_date) <= ?")
+        clauses.append("COALESCE(update_date, introduced_date, latest_action_date) <= ?")
         params.append(end_date)
     for keyword in _split_keyword_query(keyword_query):
         clauses.append(

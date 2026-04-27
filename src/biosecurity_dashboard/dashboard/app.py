@@ -38,7 +38,7 @@ DEFAULT_DASHBOARD_MAX_PAGES = 1
 
 
 def main() -> None:
-    st.set_page_config(page_title="Biosecurity Dashboard", layout="wide")
+    st.set_page_config(page_title="Biosecurity Policy Dashboard", layout="wide")
     st.markdown(
         """
         <style>
