@@ -10,6 +10,7 @@ import socket
 import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from http.client import IncompleteRead
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -493,7 +494,7 @@ def _read_binary_request(request: Request, label: str) -> tuple[bytes, str | Non
         except HTTPError as exc:
             message = exc.read().decode("utf-8", errors="replace")
             raise CongressApiError(f"{label} failed: {exc.code} {message}") from exc
-        except (TimeoutError, socket.timeout, URLError) as exc:
+        except (TimeoutError, socket.timeout, URLError, IncompleteRead) as exc:
             last_error = exc
             if attempt < REQUEST_RETRIES:
                 time.sleep(attempt)
