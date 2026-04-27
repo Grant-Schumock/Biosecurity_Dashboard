@@ -1,7 +1,7 @@
 [project]
 name = "biosecurity-dashboard"
 version = "0.1.0"
-description = "Local biosecurity dashboard for surveillance, legislation, and publication data."
+description = "Local biosecurity policy dashboard for legislation and regulatory data."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

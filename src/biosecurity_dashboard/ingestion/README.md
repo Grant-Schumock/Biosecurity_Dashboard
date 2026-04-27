@@ -1,6 +1,5 @@
 # Ingestion
 
-Shared data-pull orchestration belongs here.
+Reserved for shared data-pull orchestration as the project grows.
 
-This layer should coordinate source-specific connectors, normalize results, and write data into local storage. The dashboard refresh button can call this layer instead of knowing about individual source APIs.
-
+Current ingestion entry points are the source clients in `src/biosecurity_dashboard/sources/legislation/` and the CLI scripts in `scripts/`. Future shared orchestration can move here if refresh behavior becomes more complex.

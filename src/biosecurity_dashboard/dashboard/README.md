@@ -1,14 +1,12 @@
 # Dashboard
 
-Put the Python dashboard application here.
+Streamlit dashboard for local biosecurity policy records.
 
-Likely first choices:
+The dashboard reads from `Data/processed/legislation.sqlite` and includes:
 
-- Streamlit for quick iteration.
-- Dash if you need more structured callbacks and custom layout control.
-- Panel if notebook-style analysis will feed directly into the app.
-
-The dashboard should eventually expose a refresh button that calls the ingestion orchestrator and then reloads locally stored data.
+- Sidebar controls for local keyword search, date range, source filters, sorting, and data refresh.
+- Grouped rows for related records, using normalized docket numbers when available.
+- Expanded source rows for the individual records behind each group.
 
 ## Run locally
 

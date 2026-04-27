@@ -1,12 +1,16 @@
 # Storage
 
-Put local persistence helpers here.
+SQLite persistence helpers for the local dashboard database.
 
-Good early options:
+Current local database:
 
-- CSV or Parquet files under `Data/` for simple prototypes.
-- SQLite for a single-file local database.
-- DuckDB if dashboard queries become analytical or table-heavy.
+- `Data/processed/legislation.sqlite`
 
-Keep raw source responses separate from normalized dashboard-ready data.
+Main tables:
 
+- `bills` - matched Congress.gov bills.
+- `regulatory_documents` - matched Regulations.gov documents.
+- `federal_register_documents` - matched FederalRegister.gov documents.
+- `refresh_metadata` - most recent refresh metadata by source.
+
+Generated databases are ignored by git.
