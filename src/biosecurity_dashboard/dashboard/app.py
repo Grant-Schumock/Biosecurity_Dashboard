@@ -101,6 +101,18 @@ def render_legislation_tab() -> None:
             ["Congress.gov", "Regulations.gov", "Federal Register"],
             default=["Congress.gov", "Regulations.gov", "Federal Register"],
         )
+        sort_by = st.selectbox(
+            "Sort by",
+            [
+                "Latest Date",
+                "Document ID",
+                "Title",
+                "Sources",
+                "Entries",
+                "Matched Keywords",
+            ],
+        )
+        sort_descending = st.toggle("Descending", value=True)
 
         congress_refresh = get_refresh_metadata("congress.gov")
         regulations_refresh = get_refresh_metadata("regulations.gov")
@@ -127,6 +139,7 @@ def render_legislation_tab() -> None:
         st.info("No locally stored documents match these filters.")
         return
 
+    groups = _sort_groups(groups, sort_by, sort_descending)
     _render_grouped_results(groups)
 
 
@@ -261,6 +274,23 @@ def _group_document_id(group: dict[str, Any]) -> str:
     if group["docket"]:
         return group["docket"]
     return str(group["group_key"])
+
+
+def _sort_groups(
+    groups: list[dict[str, Any]],
+    sort_by: str,
+    descending: bool,
+) -> list[dict[str, Any]]:
+    key_functions = {
+        "Document ID": lambda group: _group_document_id(group).casefold(),
+        "Title": lambda group: str(group["title"]).casefold(),
+        "Sources": lambda group: ", ".join(group["sources"]).casefold(),
+        "Entries": lambda group: int(group["record_count"]),
+        "Latest Date": lambda group: str(group["latest_date"] or ""),
+        "Matched Keywords": lambda group: ", ".join(group["matched_keywords"]).casefold(),
+    }
+    sort_key = key_functions.get(sort_by, key_functions["Latest Date"])
+    return sorted(groups, key=sort_key, reverse=descending)
 
 
 def _source_record_row(record: dict[str, Any]) -> dict[str, Any]:
