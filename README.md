@@ -52,3 +52,9 @@ The ingestion scripts fetch source records, match against the current keyword li
 ## Data and Secrets
 
 Local databases, raw source responses, logs, and cache files are intentionally ignored by git. Do not commit API keys, `.env` files, Streamlit secrets, or generated data exports.
+
+## Example Dashboard View
+
+This is an example view of the dashboard.
+
+![Example view of the Biosecurity Dashboard](docs/assets/dashboard_preview.png)
